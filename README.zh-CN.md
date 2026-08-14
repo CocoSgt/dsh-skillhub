@@ -1,6 +1,9 @@
-# dsh-skill-hub
+# dsh-skillhub
 
 简体中文 | [English](README.md)
+
+npm 包名:`dsh-skillhub` · GitHub 仓库:
+[CocoSgt/dsh-skill-hub](https://github.com/CocoSgt/dsh-skill-hub)
 
 DeepSeek Harness(dsh)的第三方技能中枢:**把散落各处的技能汇成全局库**。
 Claude Code 的 `~/.claude/skills`、项目目录、`.skill` 包……统一入库到
@@ -67,11 +70,26 @@ skill-manager 的命名,已有安装的状态得以保留。
 
 ## 安装
 
+从 npm 安装:
+
 ```sh
-dsh plugin --profile web add /path/to/dsh-skill-hub
+dsh plugin --profile web add dsh-skillhub
 ```
 
-安装后重启 `dsh web`。卸载:`dsh plugin --profile web remove dsh-skill-hub`。
+三个 dsh 插件可以一条命令一起安装:
+
+```sh
+dsh plugin --profile web add dsh-skillhub dsh-attachments dsh-context-inspector
+```
+
+GitHub 回退方式(仓库是 `CocoSgt/dsh-skill-hub`;npm 包名是
+`dsh-skillhub`):
+
+```sh
+dsh plugin --profile web add github:CocoSgt/dsh-skill-hub
+```
+
+安装后重启 `dsh web`。卸载:`dsh plugin --profile web remove dsh-skillhub`。
 
 ## 已知限制
 

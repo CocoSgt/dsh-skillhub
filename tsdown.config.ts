@@ -5,7 +5,7 @@
  *     cordis.patch.yml 的行加载它。
  *  2. 浏览器半体：src/client/index.ts → lib/client.js（CJS 闭包工厂）。
  *     产物形如：
- *       window.__ModuleLoader__.load({ id: "dsh-skill-hub",
+ *       window.__ModuleLoader__.load({ id: "dsh-skillhub",
  *         factory: (require) => { …body…; return module.exports; } });
  *     require 只允许命中 shell 的平台种子模块表（react、cordis、
  *     ui-slots 等）；其余一切（本插件自身代码与 React 组件）内联。
@@ -28,7 +28,7 @@ const SEED_MODULES = [
 
 export default defineConfig([
   {
-    name: 'dsh-skill-hub',
+    name: 'dsh-skillhub',
     entry: ['src/index.ts'],
     outDir: 'lib',
     format: ['esm'],
@@ -41,21 +41,21 @@ export default defineConfig([
     },
   },
   {
-    name: 'dsh-skill-hub/client',
+    name: 'dsh-skillhub/client',
     entry: { client: 'src/client/index.ts' },
     outDir: 'lib',
     format: 'cjs',
     platform: 'browser',
     target: 'es2024',
     dts: false,
-    sourcemap: true,
+    sourcemap: false,
     clean: false,
     external: [...SEED_MODULES],
     noExternal: (id: string): boolean | undefined =>
       (SEED_MODULES as readonly string[]).includes(id) ? undefined : true,
     outputOptions: {
       entryFileNames: 'client.js',
-      banner: 'window.__ModuleLoader__.load({ id: "dsh-skill-hub", factory: (require) => {',
+      banner: 'window.__ModuleLoader__.load({ id: "dsh-skillhub", factory: (require) => {',
       footer: 'return module.exports; } });',
       intro: 'var module = { exports: {} }; var exports = module.exports;',
     },

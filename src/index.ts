@@ -1,5 +1,5 @@
 /**
- * dsh-skill-hub 宿主端:skillHub 网关服务。
+ * dsh-skillhub 宿主端:skillHub 网关服务。
  *
  * 核心机制:把散落各处的技能(Claude Code 的 ~/.claude/skills、项目目录、
  * .skill 包……)汇成 `<dshHome>/skills/` 这个全局库——官方 skill-filesystem
@@ -479,13 +479,13 @@ interface TypertRegistryLike {
 }
 
 const TYPERT_MANIFEST = {
-  package: 'dsh-skill-hub',
+  package: 'dsh-skillhub',
   face: 'host',
   schemas: [],
   model: { services: [], events: [], objects: [] },
   invocations: [
     {
-      id: 'dsh-skill-hub#skillHub/getState',
+      id: 'dsh-skillhub#skillHub/getState',
       service: 'skillHub',
       namespace: 'skillHub',
       method: 'getState',
@@ -494,7 +494,7 @@ const TYPERT_MANIFEST = {
       result: { mode: 'src-json' },
     },
     {
-      id: 'dsh-skill-hub#skillHub/browseDirs',
+      id: 'dsh-skillhub#skillHub/browseDirs',
       service: 'skillHub',
       namespace: 'skillHub',
       method: 'browseDirs',
@@ -503,7 +503,7 @@ const TYPERT_MANIFEST = {
       result: { mode: 'src-json' },
     },
     {
-      id: 'dsh-skill-hub#skillHub/runCommand',
+      id: 'dsh-skillhub#skillHub/runCommand',
       service: 'skillHub',
       namespace: 'skillHub',
       method: 'runCommand',

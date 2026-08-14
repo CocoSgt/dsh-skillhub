@@ -1,8 +1,13 @@
 {
-  "name": "dsh-skill-hub",
+  "name": "dsh-skillhub",
   "description": "Global skill hub for dsh: aggregates Claude Code, project, and .skill-package skills into ~/.dsh/skills with reference/copy import and slash-menu usage",
   "version": "0.1.0",
-  "private": true,
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CocoSgt/dsh-skill-hub.git"

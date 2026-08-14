@@ -1,6 +1,9 @@
-# dsh-skill-hub
+# dsh-skillhub
 
 [简体中文](README.zh-CN.md) | English
+
+npm package: `dsh-skillhub` · GitHub repository:
+[CocoSgt/dsh-skill-hub](https://github.com/CocoSgt/dsh-skill-hub)
 
 Third-party skill hub for DeepSeek Harness (dsh): **aggregate skills scattered
 everywhere into one global library.** Claude Code's `~/.claude/skills`, project
@@ -83,12 +86,27 @@ skill-manager so existing installations keep their state.
 
 ## Install
 
+Install from npm:
+
 ```sh
-dsh plugin --profile web add /path/to/dsh-skill-hub
+dsh plugin --profile web add dsh-skillhub
+```
+
+The three dsh plugins can be added together in one command:
+
+```sh
+dsh plugin --profile web add dsh-skillhub dsh-attachments dsh-context-inspector
+```
+
+GitHub fallback (the repository is `CocoSgt/dsh-skill-hub`; the npm package
+is `dsh-skillhub`):
+
+```sh
+dsh plugin --profile web add github:CocoSgt/dsh-skill-hub
 ```
 
 Restart `dsh web` afterwards. Uninstall:
-`dsh plugin --profile web remove dsh-skill-hub`.
+`dsh plugin --profile web remove dsh-skillhub`.
 
 ## Known limitations
 
