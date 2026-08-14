@@ -1,5 +1,5 @@
 {
-  "name": "dsh-skillhub",
+  "name": "dsh-skills",
   "description": "Global skill hub for dsh: aggregates Claude Code, project, and .skill-package skills into ~/.dsh/skills with reference/copy import and slash-menu usage",
   "version": "0.1.0",
   "files": [
@@ -10,7 +10,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CocoSgt/dsh-skillhub.git"
+    "url": "git+https://github.com/CocoSgt/dsh-skills.git"
   },
   "type": "module",
   "main": "lib/index.mjs",

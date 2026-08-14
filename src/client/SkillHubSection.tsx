@@ -22,7 +22,7 @@ import type { BrowseResult, HubCommand, HubCommandResult, HubSkill, HubState } f
 import { tr } from './locales.ts'
 
 /** 本命名空间的翻译函数(槽位 locale 席位注入的标准类型)。 */
-type T = TranslateNS<'dsh-skillhub'>
+type T = TranslateNS<'dsh-skills'>
 
 export interface SkillHubSectionProps {
   /** 槽位 inject 面:打开技能目录。 */
@@ -243,9 +243,9 @@ function ClampedDescription({ t, text }: { t: T, text: string }) {
 /** 技能中枢设置页组件。 */
 export function SkillHubSection({ openPath, api, t }: SkillHubSectionProps) {
   useEffect(() => {
-    if (document.getElementById('dsh-skillhub-style') === null) {
+    if (document.getElementById('dsh-skills-style') === null) {
       const style = document.createElement('style')
-      style.id = 'dsh-skillhub-style'
+      style.id = 'dsh-skills-style'
       style.textContent = CSS
       document.head.append(style)
     }

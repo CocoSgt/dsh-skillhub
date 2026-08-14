@@ -1,5 +1,5 @@
 /**
- * dsh-skillhub 宿主端:skillHub 网关服务。
+ * dsh-skills 宿主端:skillHub 网关服务。
  *
  * 核心机制:把散落各处的技能(Claude Code 的 ~/.claude/skills、项目目录、
  * .skill 包……)汇成 `<dshHome>/skills/` 这个全局库——官方 skill-filesystem
@@ -15,7 +15,7 @@
  *
  * 传输:此前的环回 sidecar HTTP 服务已移除,改为 TypertRemoteService +
  * 弱(src-json)清单注册(第三方双副本下 SRC 发现失明,原因与
- * dsh-context-inspector 相同)。暴露 `skillHub/getState|runCommand|browseDirs`
+ * dsh-inspector 相同)。暴露 `skillHub/getState|runCommand|browseDirs`
  * 三个 RPC(browseDirs 供来源选择器逐级浏览目录);runCommand 的负载是
  * 既有的命令联合,src-json 原样过 wire。
  *
@@ -479,13 +479,13 @@ interface TypertRegistryLike {
 }
 
 const TYPERT_MANIFEST = {
-  package: 'dsh-skillhub',
+  package: 'dsh-skills',
   face: 'host',
   schemas: [],
   model: { services: [], events: [], objects: [] },
   invocations: [
     {
-      id: 'dsh-skillhub#skillHub/getState',
+      id: 'dsh-skills#skillHub/getState',
       service: 'skillHub',
       namespace: 'skillHub',
       method: 'getState',
@@ -494,7 +494,7 @@ const TYPERT_MANIFEST = {
       result: { mode: 'src-json' },
     },
     {
-      id: 'dsh-skillhub#skillHub/browseDirs',
+      id: 'dsh-skills#skillHub/browseDirs',
       service: 'skillHub',
       namespace: 'skillHub',
       method: 'browseDirs',
@@ -503,7 +503,7 @@ const TYPERT_MANIFEST = {
       result: { mode: 'src-json' },
     },
     {
-      id: 'dsh-skillhub#skillHub/runCommand',
+      id: 'dsh-skills#skillHub/runCommand',
       service: 'skillHub',
       namespace: 'skillHub',
       method: 'runCommand',
