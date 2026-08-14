@@ -1,7 +1,7 @@
 /**
  * 技能中枢词典(zh 为键集真源,en 逐一对齐;官方 locale 服务注册)。
  *
- * 命名空间 'dsh-skills' 通过下方 declaration merge 登记进框架的
+ * 命名空间 'dsh-skill' 通过下方 declaration merge 登记进框架的
  * LocaleNamespaceMap:槽位注册的 locale: NS 选项与组件 props 的标准
  * t 席位由此获得完整键类型(第三方命名空间同样走这条官方通道)。
  */
@@ -9,12 +9,12 @@ import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    'dsh-skills': Key
+    'dsh-skill': Key
   }
 }
 
 /** 词典命名空间。 */
-export const NS = 'dsh-skills'
+export const NS = 'dsh-skill'
 
 /** 简体中文词典(键集真源)。 */
 export const zh = {
