@@ -1,0 +1,4 @@
+# dsh-skill-manager bundle：向组合挂宿主 half（settings 命令/状态通道 + 技能导入执行器）
+- insert:
+    - id: dsh-skill-manager
+      name: 'dsh-skill-manager'
