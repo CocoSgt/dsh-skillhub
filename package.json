@@ -3,6 +3,10 @@
   "description": "Global skill hub for dsh: aggregates Claude Code, project, and .skill-package skills into ~/.dsh/skills with reference/copy import and slash-menu usage",
   "version": "0.1.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CocoSgt/dsh-skill-hub.git"
+  },
   "type": "module",
   "main": "lib/index.mjs",
   "exports": {
@@ -26,7 +30,7 @@
     }
   },
   "peerDependencies": {
-    "cordis": "^4.0.0-rc.7"
+    "@deepseek-ai/cordis": "^4.0.1"
   },
   "scripts": {
     "build": "tsdown --config ./tsdown.config.ts",
