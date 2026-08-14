@@ -1,5 +1,5 @@
 /**
- * dsh-skill 的浏览器端 half(React 设置页)。
+ * dsh-skills 的浏览器端 half(React 设置页)。
  *
  * 管理面板注册进官方设置域的 settings.section 槽(与 Models / Plugins
  * 同级的导航页)。数据通道:宿主 skillHub 网关的 typert RPC——$mount
@@ -53,31 +53,31 @@ const passCodec = (typeSymbol: string) => ({ mode: 'strict' as const, typeSymbol
 
 const DESCRIPTORS = [
   {
-    id: 'dsh-skill#skillHub/getState',
+    id: 'dsh-skills#skillHub/getState',
     service: 'skillHub',
     namespace: 'skillHub',
     method: 'getState',
     invocation: { kind: 'direct' as const },
     parameters: [],
-    result: passCodec('dsh-skill#HubState'),
+    result: passCodec('dsh-skills#HubState'),
   },
   {
-    id: 'dsh-skill#skillHub/browseDirs',
+    id: 'dsh-skills#skillHub/browseDirs',
     service: 'skillHub',
     namespace: 'skillHub',
     method: 'browseDirs',
     invocation: { kind: 'direct' as const },
-    parameters: [{ name: 'dirPath', wire: 'dirPath', source: 'json' as const, codec: passCodec('dsh-skill#DirPath') }],
-    result: passCodec('dsh-skill#BrowseResult'),
+    parameters: [{ name: 'dirPath', wire: 'dirPath', source: 'json' as const, codec: passCodec('dsh-skills#DirPath') }],
+    result: passCodec('dsh-skills#BrowseResult'),
   },
   {
-    id: 'dsh-skill#skillHub/runCommand',
+    id: 'dsh-skills#skillHub/runCommand',
     service: 'skillHub',
     namespace: 'skillHub',
     method: 'runCommand',
     invocation: { kind: 'direct' as const },
-    parameters: [{ name: 'command', wire: 'command', source: 'json' as const, codec: passCodec('dsh-skill#HubCommand') }],
-    result: passCodec('dsh-skill#HubCommandResult'),
+    parameters: [{ name: 'command', wire: 'command', source: 'json' as const, codec: passCodec('dsh-skills#HubCommand') }],
+    result: passCodec('dsh-skills#HubCommandResult'),
   },
 ]
 
@@ -95,8 +95,8 @@ export const inject = ['slots', 'remote']
  */
 export async function apply(ctx: ClientContext): Promise<void> {
   const remote = (ctx as unknown as { remote: RemoteFace }).remote
-  const disposeRemote = await remote.$mount({ package: 'dsh-skill', descriptors: DESCRIPTORS })
-  ctx.effect(() => () => { void disposeRemote() }, 'dsh-skill: remote descriptor mount')
+  const disposeRemote = await remote.$mount({ package: 'dsh-skills', descriptors: DESCRIPTORS })
+  ctx.effect(() => () => { void disposeRemote() }, 'dsh-skills: remote descriptor mount')
 
   let calls: SkillHubCalls | undefined
   ctx.inject(['remote', 'remote.skillHub'], (namespaceCtx: ClientContext): void => {
@@ -132,7 +132,7 @@ export async function apply(ctx: ClientContext): Promise<void> {
     ctx.effect(() => {
       const dispose = locale.register(NS, { zh, en })
       return () => { if (typeof dispose === 'function') dispose() }
-    }, 'dsh-skill: dictionary registration')
+    }, 'dsh-skills: dictionary registration')
     const t = locale.bind(NS)
     setBoundT(t)
     ctx.slots.inject('settings.section', () => ctx.slots.register({
