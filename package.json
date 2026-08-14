@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-hub",
-  "description": "dsh 技能中枢:把散落各处的技能(Claude Code、项目、.skill 包)汇成全局库——引用或复制导入,斜杠菜单直接调用;设置页「🧩 技能」",
+  "description": "Global skill hub for dsh: aggregates Claude Code, project, and .skill-package skills into ~/.dsh/skills with reference/copy import and slash-menu usage",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -37,6 +37,7 @@
     "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.6",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.0",
     "react": "^18.3.0",

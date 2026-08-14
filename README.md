@@ -1,87 +1,121 @@
 # dsh-skill-hub
 
-DeepSeek Harness(dsh)的第三方技能中枢:**把散落各处的技能汇成全局库**。
-Claude Code 的 `~/.claude/skills`、项目目录、`.skill` 包……统一入库到
-`~/.dsh/skills`(官方 skill-filesystem 的默认扫描根,watcher 实时),入库即
-出现在输入框的「/」斜杠菜单。设置页里的「🧩 技能」导航页。
+[简体中文](README.zh-CN.md) | English
 
-## 两种入库身份
+Third-party skill hub for DeepSeek Harness (dsh): **aggregate skills scattered
+everywhere into one global library.** Claude Code's `~/.claude/skills`, project
+directories, `.skill` packages — everything lands in `~/.dsh/skills` (the
+official skill-filesystem's default scan root, watched live), and once
+imported appears in the "/" slash menu of the input box. Adds a "Skills" page
+to the settings dialog.
 
-| | 引用(推荐) | 副本 |
+## Two import identities
+
+| | Link (recommended) | Copy |
 | --- | --- | --- |
-| 实现 | `skills/<name>` → 来源的**符号链接** | 整树拷贝 |
-| 同步 | **不存在同步问题**:只有一份文件,编辑即编辑来源 | 与来源独立演化(state 记录来源备查) |
-| 来源删了 | 面板标注「引用失效」,一键移除(不动来源) | 无影响 |
-| 适用 | 来源长期存在且归你维护 | 来源临时(.skill 包、要删的仓库),或想改全局版不动来源 |
+| Implementation | `skills/<name>` is a **symlink** to the source | full tree copy |
+| Sync | **No sync problem**: one file on both sides, editing edits the source | evolves independently (state records the source for reference) |
+| Source deleted | panel marks it "broken link", one-click removal (source untouched) | unaffected |
+| Fits | long-lived sources you maintain | throwaway sources (.skill packages, repos you'll delete), or a global version you can change freely |
 
-harness 的技能扫描、fs 提供者与 watcher 都原生跟随符号链接(实测
-skill-filesystem 的 `nodeEntryKind` 显式处理),引用无需任何补丁,且在
-全部加载形态(含 SDK/ACP,插件装不进去的那些)下生效。
+The harness's skill scanner, fs provider, and watcher all follow symlinks
+natively (skill-filesystem's `nodeEntryKind` handles them explicitly), so
+links need no patches and work across every loading form (including SDK/ACP,
+where plugins cannot be installed).
 
-## 概念对齐 harness 现实
+## Aligned with how the harness actually works
 
-- **没有「安装」这回事**:技能放进扫描根即生效。本页管理的是全局库
-  (`~/.dsh/skills`,rank 400,对所有会话生效);项目目录里的技能
-  (`.dsh/skills`、`.agents/skills`,rank 100/200)由 harness 直接扫描,
-  不经过本页——它们「一直可调用」正是这个原因,同名时项目技能优先。
-- **技能是文件树,不是一个 MD**:编辑器只编辑 `SKILL.md` 并明示还有几个
-  资源文件;资源用「打开目录」管理。导出 .skill 整树打包(引用则解引用
-  打包真实文件)。
-- **编辑引用 = 编辑来源**:编辑器头部黄字明示,保存直接写入来源文件。
+- **There is no "install"**: a skill takes effect the moment it sits in a scan
+  root. This page manages the global library (`~/.dsh/skills`, rank 400, all
+  sessions); skills in project directories (`.dsh/skills`, `.agents/skills`,
+  rank 100/200) are scanned by the harness directly and never pass through
+  this page — that is exactly why they are "always invocable", and why project
+  skills win on name collisions.
+- **A skill is a file tree, not one MD**: the editor edits `SKILL.md` only and
+  tells you how many resource files exist; manage resources via "Open
+  directory". Export packages the whole tree as .skill (links are
+  dereferenced: real files are packed).
+- **Editing a link = editing the source**: the editor header says so; saving
+  writes straight to the source file.
 
-## 页签
+## Tabs
 
-1. **全局技能**:页首动作行「＋ 新建技能」(内联展开,不用滚动)与
-   「上传 .skill」(选完文件即入库,无中间确认步);技能多时有筛选框。
-   每张卡:身份徽标(`引用 → 来源` / `副本` / `本地创建` / `引用失效`)、
-   资源文件数、非默认调用策略;描述默认 3 行折叠(点击展开);主操作
-   「编辑 SKILL.md」,导出/打开目录/复制名收进 ⋯ 菜单,删除行内两步确认
-   (引用只删链接)。
-2. **发现**:页首「扫描目录」chips 内联管理(每个 chip 标注技能数或
-   「不存在」,✕ 即时移除,＋ 就地添加——不再有独立的「来源」页签);
-   扫描结果每项「引用」(主)/「复制」,「全部引用」走单次批量 RPC;
-   结果多时有筛选框。
+1. **Global skills**: the top action row has "＋ New skill" (inline expander,
+   no scrolling) and "Upload .skill" (imports as soon as a file is picked, no
+   intermediate confirmation); a filter box appears with many skills. Each
+   card: identity badges (`Link → source` / `Copy` / `Created locally` /
+   `Broken link`), resource count, non-default invocation policy; descriptions
+   clamp to 3 lines by default (click to expand); primary action "Edit
+   SKILL.md", with export / open directory / copy name in the ⋯ menu and an
+   inline two-step delete confirmation (links only remove the link).
+2. **Discover**: scan directories managed inline as chips at the top (each
+   chip shows its skill count or "missing", ✕ removes immediately, ＋ adds in
+   place — there is no separate "Sources" tab); each scanned item offers
+   "Link" (primary) / "Copy", and "Link all" goes through a single batch RPC;
+   a filter box appears with many results.
 
-## 架构
+## Architecture
 
-- **宿主端**(`lib/index.mjs`):`SkillHubGateway` 继承 `TypertRemoteService`,
-  暴露 `skillHub/getState|runCommand` 两个 RPC(runCommand 负载为命令联合,
-  src-json 过 wire)。此前的 3180–3189 端口探测 sidecar HTTP 服务已移除。
-  第三方双副本场景下 SRC 发现失明,同时注册弱清单进宿主 typert registry。
-- **浏览器端**(`lib/client.js`):$mount identity 编解码描述符 →
-  `ctx.remote.skillHub`;面板注册 `settings.section` 槽,「打开目录」走官方
-  `host.openPath`。
+- **Host half** (`lib/index.mjs`): `SkillHubGateway` extends
+  `TypertRemoteService` and exposes three RPCs: `skillHub/getState`,
+  `skillHub/runCommand`, and `skillHub/browseDirs` (the last one powers the
+   source picker's directory browser). The runCommand payload is a command
+   union carried verbatim over src-json. The earlier 3180–3189 port-probing
+   sidecar HTTP service is gone. Because SRC discovery is blind in the
+   third-party dual-copy scenario, a weak manifest is also registered into
+   the host typert registry.
+- **Browser half** (`lib/client.js`): $mount identity-codec descriptors →
+  `ctx.remote.skillHub`; the panel registers into the `settings.section` slot;
+  "Open directory" goes through the official `host.openPath`.
+- **i18n**: all visible copy renders through the official locale service.
+  zh/en dictionaries live in `src/client/locales.ts`; the slot registration
+  declares `locale: NS`, so the framework injects a reactive `t` seat into
+  the component props. Host runCommand results carry a stable `code`
+  (e.g. `import.linked`, `err.read.notFound`) plus optional `params` and an
+  explicit `level: 'error'`; the client translates by code and falls back to
+  the Chinese `message` field, and colors the status line by `level` instead
+  of guessing from message text.
 
-state 文件 `~/.dsh/skills/.skill-manager.json` 记录来源配置与每个技能的
-`{mode, source, addedAt}`(为二期漂移检测预留 schema)。
+The state file `~/.dsh/skills/.skill-manager.json` records the source
+configuration and each skill's `{mode, source, addedAt}` (schema reserved for
+future drift detection). Its filename is deliberately kept from the old
+skill-manager so existing installations keep their state.
 
-## 安装
+## Install
 
 ```sh
 dsh plugin --profile web add /path/to/dsh-skill-hub
 ```
 
-安装后重启 `dsh web`。卸载:`dsh plugin --profile web remove dsh-skill-hub`。
+Restart `dsh web` afterwards. Uninstall:
+`dsh plugin --profile web remove dsh-skill-hub`.
 
-## 已知限制
+## Known limitations
 
-- 副本与来源的漂移检测/拉取/推回是二期;本期副本只记录来源不判定漂移。
-- Windows 上目录引用用 junction;文件级引用无特权时自动退化为复制并如实提示。
-- 引用技能的库内链接名固定于入库时刻;来源 frontmatter 改名后技能名跟着
-  来源走,链接名不自动更新(无害,仅目录名与技能名不一致)。
-- 「全部引用」串行执行,遇错即停(逐条报错,不刷屏)。
+- Drift detection/pull/push between copies and their sources is phase two;
+  for now copies only record the source.
+- Directory links use junctions on Windows; file-level links fall back to a
+  copy without privilege, and say so honestly.
+- A linked skill's in-library link name is fixed at import time; if the
+  source's frontmatter name changes later, the skill name follows the source
+  but the link name does not (harmless — only the directory name and the
+  skill name diverge).
+- "Link all" runs serially; failures are collected and summarized (first
+  failure shown) without flooding the status line.
+- Host-side messages for a few low-level failures (e.g. corrupt zip details)
+  ride inside a `{message}` param and remain Chinese in the English UI.
 
-## 开发
+## Development
 
 ```sh
 pnpm install
 pnpm run check   # tsc --noEmit
-pnpm run build   # tsdown(宿主 ESM + 浏览器 bundle)
+pnpm run build   # tsdown (host ESM + browser bundle)
 ```
 
-注意:宿主方法参数名就是 RPC wire 字段名(Gateway SRC 模式),构建不得
-压缩改写参数名。
+Note: host method parameter names ARE the RPC wire field names (Gateway SRC
+mode); the build must never minify or rewrite parameter names.
 
-## 许可
+## License
 
 MIT

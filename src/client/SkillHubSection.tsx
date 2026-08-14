@@ -9,11 +9,20 @@
  *   发现页顶部(存在性/技能数直接标在 chip 上,坏路径一眼可见)。
  * - **批量引用走单次 RPC**(importLinkBatch),不逐项刷新闪屏。
  *
+ * 全部可见文案经词典键渲染:t 由槽位注册声明的 locale: NS 注入,
+ * 随界面语言切换重推导;子组件经 props 逐层透传。宿主结果的展示文案
+ * 优先按结果码 code 取本地化版本,取不到回退宿主中文 message。
+ *
  * 数据操作经宿主 skillHub RPC。样式复用官方设置页体系。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, IconSkillOutline16, MarkdownText, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BrowseResult, HubCommand, HubCommandResult, HubSkill, HubState } from '../index.js'
+import { tr } from './locales.ts'
+
+/** 本命名空间的翻译函数(槽位 locale 席位注入的标准类型)。 */
+type T = TranslateNS<'dsh-skill-hub'>
 
 export interface SkillHubSectionProps {
   /** 槽位 inject 面:打开技能目录。 */
@@ -24,6 +33,8 @@ export interface SkillHubSectionProps {
     runCommand(command: HubCommand): Promise<HubCommandResult>
     browseDirs(dirPath: string): Promise<BrowseResult>
   }
+  /** 槽位 locale 席位:框架注入的翻译函数。 */
+  t: T
 }
 
 function fmtDate(iso: string): string {
@@ -37,9 +48,23 @@ function shortPath(p: string): string {
   return p.replace(/^\/(Users|home)\/[^/]+/u, '~')
 }
 
-/** 状态行语气:失败类文案挂 error 红,成功/中性走 tertiary。 */
-function statusTone(message: string): 'idle' | 'error' {
-  return /失败|出错|不合法|损坏|无法/u.test(message) ? 'error' : 'idle'
+/**
+ * 状态行:存词典键而非成品文案,渲染时经 t 取词,语言切换即时跟随。
+ * fallback 是键缺翻译时的宿主中文回退(runCommand 结果码路径)。
+ */
+interface StatusLine {
+  key: string
+  params?: Record<string, unknown>
+  fallback?: string
+  /** 宿主显式给出的语气:error 标红,缺省 idle。 */
+  level: 'idle' | 'error'
+}
+
+/** 状态行文本:键命中词典取译文,否则回退 fallback(都没有则显示键)。 */
+function statusText(t: T, line: StatusLine): string {
+  // key 经 wire 来自宿主(任意 string),运行时由 translate 的缺词回键兜底。
+  const translated = t(line.key as Parameters<T>[0], line.params)
+  return translated === line.key && line.fallback !== undefined ? line.fallback : translated
 }
 
 const CSS = `
@@ -181,8 +206,8 @@ function downloadArchive(name: string, archiveBase64: string): void {
 }
 
 /** 行内两步确认按钮(替代 window.confirm;4 秒未确认自动收回)。 */
-function ConfirmButton(props: { label: string, confirmLabel: string, onConfirm: () => void }) {
-  const { label, confirmLabel, onConfirm } = props
+function ConfirmButton(props: { t: T, label: string, confirmLabel: string, onConfirm: () => void }) {
+  const { t, label, confirmLabel, onConfirm } = props
   const [arming, setArming] = useState(false)
   useEffect(() => {
     if (!arming) return
@@ -193,21 +218,21 @@ function ConfirmButton(props: { label: string, confirmLabel: string, onConfirm: 
     ? (
       <>
         <Button size="sm" variant="ghost" className="dsh-skh-danger" onClick={onConfirm}>{confirmLabel}</Button>
-        <Button size="sm" variant="outline" onClick={() => { setArming(false) }}>取消</Button>
+        <Button size="sm" variant="outline" onClick={() => { setArming(false) }}>{t('common.cancel')}</Button>
       </>
     )
     : <Button size="sm" variant="ghost" className="dsh-skh-danger" onClick={() => { setArming(true) }}>{label}</Button>
 }
 
 /** 可折叠描述:默认 3 行截断,点击展开/收起。 */
-function ClampedDescription({ text }: { text: string }) {
+function ClampedDescription({ t, text }: { t: T, text: string }) {
   const [clamped, setClamped] = useState(true)
   if (text === '') return null
   return (
     <div
       className="dsh-skh-desc dsh-skh-md"
       data-clamped={clamped ? 'true' : undefined}
-      title={clamped ? '点击展开' : '点击收起'}
+      title={clamped ? t('desc.expand') : t('desc.collapse')}
       onClick={() => { setClamped(value => !value) }}
     >
       <MarkdownText text={text} />
@@ -216,7 +241,7 @@ function ClampedDescription({ text }: { text: string }) {
 }
 
 /** 技能中枢设置页组件。 */
-export function SkillHubSection({ openPath, api }: SkillHubSectionProps) {
+export function SkillHubSection({ openPath, api, t }: SkillHubSectionProps) {
   useEffect(() => {
     if (document.getElementById('dsh-skill-hub-style') === null) {
       const style = document.createElement('style')
@@ -228,35 +253,48 @@ export function SkillHubSection({ openPath, api }: SkillHubSectionProps) {
 
   const [tab, setTab] = useState<TabId>('hub')
   const [state, setState] = useState<HubState | undefined>(undefined)
-  const [message, setMessage] = useState('加载中…')
+  const [status, setStatus] = useState<StatusLine>({ key: 'status.loading', level: 'idle' })
   const [editing, setEditing] = useState<{ skill: HubSkill, content: string } | undefined>(undefined)
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (api === undefined) throw new Error('skillHub 服务未就绪')
+    if (api === undefined) throw new Error(tr('svc.unready'))
     setState(await api.getState())
   }, [api])
 
   useEffect(() => {
     void refresh()
-      .then(() => setMessage(''))
+      .then(() => { setStatus({ key: '', level: 'idle' }) })
       .catch((error: unknown) => {
-        setMessage(`加载失败:${error instanceof Error ? error.message : String(error)}`)
+        setStatus({
+          key: 'status.loadFailed',
+          params: { msg: error instanceof Error ? error.message : String(error) },
+          level: 'error',
+        })
       })
   }, [refresh])
 
   const run = useCallback(async (command: HubCommand): Promise<HubCommandResult> => {
-    if (api === undefined) throw new Error('skillHub 服务未就绪')
-    if (busy) throw new Error('上一个操作还在执行')
+    if (api === undefined) throw new Error(tr('svc.unready'))
+    if (busy) throw new Error(tr('svc.busy'))
     setBusy(true)
-    setMessage('执行中…')
+    setStatus({ key: 'status.running', level: 'idle' })
     try {
       const result = await api.runCommand(command)
       setState(result.state)
-      setMessage(result.message)
+      setStatus({
+        key: result.code ?? '',
+        params: result.params,
+        fallback: result.message,
+        level: result.level === 'error' ? 'error' : 'idle',
+      })
       return result
     } catch (error) {
-      setMessage(`出错:${error instanceof Error ? error.message : String(error)}`)
+      setStatus({
+        key: 'status.error',
+        params: { msg: error instanceof Error ? error.message : String(error) },
+        level: 'error',
+      })
       throw error
     } finally {
       setBusy(false)
@@ -267,25 +305,25 @@ export function SkillHubSection({ openPath, api }: SkillHubSectionProps) {
     try {
       const response = await run({ action: 'read', name: skill.name })
       if (response.body !== undefined) setEditing({ skill, content: response.body.content })
-      else setMessage('读取失败:未收到内容')
+      else setStatus({ key: 'read.emptyBody', level: 'error' })
     } catch { /* run 已提示 */ }
   }, [run])
 
   const tabs = useMemo(() => ([
-    { id: 'hub' as const, label: `全局技能 (${state?.skills.length ?? 0})` },
-    { id: 'discover' as const, label: `发现 (${state?.discoverable.length ?? 0})` },
-  ]), [state])
+    { id: 'hub' as const, label: t('tab.hub', { count: state?.skills.length ?? 0 }) },
+    { id: 'discover' as const, label: t('tab.discover', { count: state?.discoverable.length ?? 0 }) },
+  ]), [state, t])
 
   return (
     <div className="dsh-skh-section">
       <h2 className="dsh-skh-heading">
-        <IconSkillOutline16 size={16} />技能
+        <IconSkillOutline16 size={16} />{t('nav')}
       </h2>
       <p className="dsh-skh-intro">
-        全局技能库(~/.dsh/skills):对所有会话生效,出现在输入框的「/」菜单。项目目录里的技能由 dsh 直接扫描生效,不经过此页。
+        {t('intro')}
       </p>
-      <p className="dsh-skh-status" role="status" aria-live="polite" data-tone={statusTone(message)}>{message}</p>
-      <div className="dsh-skh-tabs" role="tablist" aria-label="技能中枢页签">
+      <p className="dsh-skh-status" role="status" aria-live="polite" data-tone={status.level}>{statusText(t, status)}</p>
+      <div className="dsh-skh-tabs" role="tablist" aria-label={t('tabs.aria')}>
         {tabs.map(entry => (
           <button
             key={entry.id}
@@ -303,6 +341,7 @@ export function SkillHubSection({ openPath, api }: SkillHubSectionProps) {
           editing !== undefined
             ? (
               <SkillEditor
+                t={t}
                 editing={editing}
                 run={run}
                 openPath={openPath}
@@ -311,6 +350,7 @@ export function SkillHubSection({ openPath, api }: SkillHubSectionProps) {
             )
             : (
               <HubTab
+                t={t}
                 state={state}
                 run={run}
                 startEdit={startEdit}
@@ -319,41 +359,42 @@ export function SkillHubSection({ openPath, api }: SkillHubSectionProps) {
               />
             )
         )}
-        {tab === 'discover' && <DiscoverTab state={state} run={run} browseDirs={api?.browseDirs} />}
+        {tab === 'discover' && <DiscoverTab t={t} state={state} run={run} browseDirs={api?.browseDirs} />}
       </div>
     </div>
   )
 }
 
 interface TabCommon {
+  t: T
   run: (command: HubCommand) => Promise<HubCommandResult>
 }
 
 /** 身份徽标集合。 */
-function modeTags(skill: HubSkill): { text: string, kind?: string, title?: string }[] {
+function modeTags(t: T, skill: HubSkill): { text: string, kind?: string, title?: string }[] {
   const tags: { text: string, kind?: string, title?: string }[] = []
-  if (skill.broken) tags.push({ text: '引用失效', kind: 'broken', title: `来源已消失:${skill.sourcePath}` })
-  else if (skill.mode === 'link') tags.push({ text: `引用 → ${shortPath(skill.sourcePath)}`, kind: 'link', title: skill.sourcePath })
-  else if (skill.mode === 'copy') tags.push({ text: '副本', title: skill.sourcePath === '' ? undefined : `复制自 ${skill.sourcePath}` })
-  else tags.push({ text: '本地创建' })
+  if (skill.broken) tags.push({ text: t('tag.broken'), kind: 'broken', title: t('tag.brokenTitle', { path: skill.sourcePath }) })
+  else if (skill.mode === 'link') tags.push({ text: t('tag.link', { path: shortPath(skill.sourcePath) }), kind: 'link', title: skill.sourcePath })
+  else if (skill.mode === 'copy') tags.push({ text: t('tag.copy'), title: skill.sourcePath === '' ? undefined : t('tag.copyTitle', { path: skill.sourcePath }) })
+  else tags.push({ text: t('tag.local') })
   // 「用户 + 模型可调用」是默认态,只标注非默认的收窄。
-  if (skill.invocation === 'user') tags.push({ text: '仅用户可调用' })
-  if (skill.invocation === 'model') tags.push({ text: '仅模型可调用' })
-  if (skill.resourceCount > 0) tags.push({ text: `${skill.resourceCount} 个资源文件` })
+  if (skill.invocation === 'user') tags.push({ text: t('tag.userOnly') })
+  if (skill.invocation === 'model') tags.push({ text: t('tag.modelOnly') })
+  if (skill.resourceCount > 0) tags.push({ text: t('tag.resources', { count: skill.resourceCount }) })
   return tags
 }
 
 /** 一张全局技能卡:主操作「编辑」,次要操作收进 ⋯ 菜单。 */
-function SkillCard({ skill, run, startEdit, openPath }: TabCommon & {
+function SkillCard({ t, skill, run, startEdit, openPath }: TabCommon & {
   skill: HubSkill
   startEdit: (skill: HubSkill) => Promise<void>
   openPath: ((path: string) => void) | undefined
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const menuItems = [
-    { id: 'export', label: '导出 .skill' },
-    ...openPath !== undefined ? [{ id: 'open', label: '打开目录' }] : [],
-    { id: 'copy-name', label: `复制 /${skill.name}` },
+    { id: 'export', label: t('card.export') },
+    ...openPath !== undefined ? [{ id: 'open', label: t('card.openDir') }] : [],
+    { id: 'copy-name', label: t('card.copyName', { name: skill.name }) },
   ]
   const onMenuSelect = (id: string): void => {
     setMenuOpen(false)
@@ -374,16 +415,16 @@ function SkillCard({ skill, run, startEdit, openPath }: TabCommon & {
       <div className="dsh-skh-rowHead">
         <span className="dsh-skh-rowIdentity">
           <span className="dsh-skh-rowName"><code>/{skill.name}</code></span>
-          {modeTags(skill).map(tag => (
+          {modeTags(t, skill).map(tag => (
             <span key={tag.text} className="dsh-skh-tag" data-kind={tag.kind} title={tag.title}>{tag.text}</span>
           ))}
         </span>
         <span className="dsh-skh-rowActions">
-          {!skill.broken && <Button size="sm" variant="outline" onClick={() => void startEdit(skill)}>编辑 SKILL.md</Button>}
+          {!skill.broken && <Button size="sm" variant="outline" onClick={() => void startEdit(skill)}>{t('card.edit')}</Button>}
           {!skill.broken && (
             <Menu
               open={menuOpen}
-              anchor={<Button size="sm" variant="outline" aria-label="更多操作" onClick={() => { setMenuOpen(value => !value) }}>⋯</Button>}
+              anchor={<Button size="sm" variant="outline" aria-label={t('card.more')} onClick={() => { setMenuOpen(value => !value) }}>⋯</Button>}
               items={menuItems}
               onSelect={onMenuSelect}
               onClose={() => { setMenuOpen(false) }}
@@ -391,58 +432,59 @@ function SkillCard({ skill, run, startEdit, openPath }: TabCommon & {
             />
           )}
           <ConfirmButton
-            label={skill.mode === 'link' ? '移除引用' : '删除'}
-            confirmLabel={skill.mode === 'link' ? '确认移除(不动来源)' : '确认删除(入回收站)'}
+            t={t}
+            label={skill.mode === 'link' ? t('card.removeLink') : t('card.delete')}
+            confirmLabel={skill.mode === 'link' ? t('card.removeLinkConfirm') : t('card.deleteConfirm')}
             onConfirm={() => { void run({ action: 'delete', name: skill.name }).catch(() => undefined) }}
           />
         </span>
       </div>
-      {!skill.broken && <ClampedDescription text={skill.description} />}
+      {!skill.broken && <ClampedDescription t={t} text={skill.description} />}
       {skill.broken
-        ? <p className="dsh-skh-meta" data-tone="error">来源已消失:{shortPath(skill.sourcePath)}(移除引用不会影响来源;若来源只是移动了位置,移除后到「发现」页重新引用)</p>
-        : skill.addedAt !== '' ? <p className="dsh-skh-meta">入库于 {fmtDate(skill.addedAt)}</p> : null}
+        ? <p className="dsh-skh-meta" data-tone="error">{t('card.brokenNote', { path: shortPath(skill.sourcePath) })}</p>
+        : skill.addedAt !== '' ? <p className="dsh-skh-meta">{t('card.addedAt', { date: fmtDate(skill.addedAt) })}</p> : null}
     </li>
   )
 }
 
 /** 内联新建卡(粘贴创建;显示在列表上方,不用滚动)。 */
-function CreateCard({ run, onDone }: TabCommon & { onDone: () => void }) {
+function CreateCard({ t, run, onDone }: TabCommon & { onDone: () => void }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
   return (
     <section className="dsh-skh-editor">
-      <div className="dsh-skh-blockTitle">新建技能</div>
-      <p className="dsh-skh-intro">直接写内容;名称与描述可留空(自动从内容推断),也可以粘贴带 --- frontmatter 的完整 SKILL.md。</p>
+      <div className="dsh-skh-blockTitle">{t('create.title')}</div>
+      <p className="dsh-skh-intro">{t('create.intro')}</p>
       <div className="dsh-skh-field">
-        <label className="dsh-skh-fieldLabel" htmlFor="dsh-skh-new-name">名称(可留空)</label>
+        <label className="dsh-skh-fieldLabel" htmlFor="dsh-skh-new-name">{t('create.nameLabel')}</label>
         <input id="dsh-skh-new-name" className="dsh-skh-input" placeholder="my-skill"
           value={name} onChange={event => setName(event.target.value)} />
       </div>
       <div className="dsh-skh-field">
-        <label className="dsh-skh-fieldLabel" htmlFor="dsh-skh-new-desc">描述(可留空)</label>
-        <input id="dsh-skh-new-desc" className="dsh-skh-input" placeholder="这个技能什么时候用(留空取正文首行)"
+        <label className="dsh-skh-fieldLabel" htmlFor="dsh-skh-new-desc">{t('create.descLabel')}</label>
+        <input id="dsh-skh-new-desc" className="dsh-skh-input" placeholder={t('create.descPlaceholder')}
           value={description} onChange={event => setDescription(event.target.value)} />
       </div>
       <div className="dsh-skh-field">
-        <label className="dsh-skh-fieldLabel" htmlFor="dsh-skh-new-body">技能正文(Markdown)</label>
+        <label className="dsh-skh-fieldLabel" htmlFor="dsh-skh-new-body">{t('create.bodyLabel')}</label>
         <textarea id="dsh-skh-new-body" className="dsh-skh-textarea"
-          placeholder={'技能正文。示例:\n\n1. 打开 xxx\n2. 检查 yyy'}
+          placeholder={t('create.bodyPlaceholder')}
           value={content} onChange={event => setContent(event.target.value)} />
       </div>
       <div className="dsh-skh-editorActions">
-        <Button size="sm" variant="outline" onClick={onDone}>取消</Button>
+        <Button size="sm" variant="outline" onClick={onDone}>{t('common.cancel')}</Button>
         <Button size="sm" variant="primary" disabled={content.trim() === ''} onClick={() => {
           void run({ action: 'importPaste', name, description, content })
             .then(() => { onDone() })
             .catch(() => undefined)
-        }}>创建</Button>
+        }}>{t('create.submit')}</Button>
       </div>
     </section>
   )
 }
 
-function HubTab({ state, run, startEdit, openPath, goDiscover }: TabCommon & {
+function HubTab({ t, state, run, startEdit, openPath, goDiscover }: TabCommon & {
   state: HubState | undefined
   startEdit: (skill: HubSkill) => Promise<void>
   openPath: ((path: string) => void) | undefined
@@ -472,36 +514,36 @@ function HubTab({ state, run, startEdit, openPath, goDiscover }: TabCommon & {
   return <>
     <div className="dsh-skh-toolbar">
       <Button size="sm" variant={creating ? 'outline' : 'primary'} onClick={() => { setCreating(value => !value) }}>
-        {creating ? '收起新建' : '＋ 新建技能'}
+        {creating ? t('hub.collapse') : t('hub.new')}
       </Button>
       <label>
         <input type="file" accept=".skill,.zip" style={{ display: 'none' }}
           onChange={event => { onPickArchive(event.target.files?.[0]); event.target.value = '' }} />
         <Button size="sm" variant="outline" onClick={event => {
           (event.currentTarget.parentElement?.querySelector('input[type=file]') as HTMLInputElement | null)?.click()
-        }}>上传 .skill</Button>
+        }}>{t('hub.upload')}</Button>
       </label>
       {list.length > 5 && (
-        <input className="dsh-skh-filter" placeholder="筛选技能…" aria-label="筛选技能"
+        <input className="dsh-skh-filter" placeholder={t('hub.filter')} aria-label={t('hub.filter')}
           value={filter} onChange={event => setFilter(event.target.value)} />
       )}
     </div>
-    {creating && <CreateCard run={run} onDone={() => { setCreating(false) }} />}
+    {creating && <CreateCard t={t} run={run} onDone={() => { setCreating(false) }} />}
     {list.length === 0 && !creating
       ? (
         <p className="dsh-skh-empty">
-          全局库还是空的。
+          {t('hub.empty')}
           {discoverCount > 0 && (
-            <Button size="sm" variant="primary" onClick={goDiscover}>去「发现」引用现有技能({discoverCount})</Button>
+            <Button size="sm" variant="primary" onClick={goDiscover}>{t('hub.goDiscover', { count: discoverCount })}</Button>
           )}
         </p>
       )
       : shown.length === 0 && filter !== ''
-        ? <p className="dsh-skh-empty">没有匹配「{filter}」的技能。</p>
+        ? <p className="dsh-skh-empty">{t('filter.noMatch', { filter })}</p>
         : (
           <ul className="dsh-skh-cards">
             {shown.map(skill => (
-              <SkillCard key={skill.name} skill={skill} run={run} startEdit={startEdit} openPath={openPath} />
+              <SkillCard key={skill.name} t={t} skill={skill} run={run} startEdit={startEdit} openPath={openPath} />
             ))}
           </ul>
         )}
@@ -509,7 +551,7 @@ function HubTab({ state, run, startEdit, openPath, goDiscover }: TabCommon & {
 }
 
 /** SKILL.md 编辑器:脏态守卫 + Cmd/Ctrl+S,保存后停留;引用技能明示写穿来源。 */
-function SkillEditor({ editing, run, openPath, onClose }: TabCommon & {
+function SkillEditor({ t, editing, run, openPath, onClose }: TabCommon & {
   editing: { skill: HubSkill, content: string }
   openPath: ((path: string) => void) | undefined
   onClose: () => void
@@ -534,23 +576,23 @@ function SkillEditor({ editing, run, openPath, onClose }: TabCommon & {
   return <div className="dsh-skh-editor">
     <div className="dsh-skh-editorHeader">
       <div className="dsh-skh-editorTitleRow">
-        <span className="dsh-skh-editorTitle">编辑 SKILL.md:/{skill.name}</span>
+        <span className="dsh-skh-editorTitle">{t('editor.title', { name: skill.name })}</span>
         {openPath !== undefined && (
           <button type="button" className="dsh-skh-link" onClick={() => {
             openPath(skill.mode === 'link' && skill.sourcePath !== '' ? skill.sourcePath : skill.dir)
-          }}>打开目录</button>
+          }}>{t('card.openDir')}</button>
         )}
       </div>
       {skill.mode === 'link' && (
-        <span className="dsh-skh-editorNote">⚠ 这是引用技能:保存会直接写入来源文件 {skill.sourcePath}(在 Claude Code 等处同步可见)。</span>
+        <span className="dsh-skh-editorNote">{t('editor.linkNote', { path: skill.sourcePath })}</span>
       )}
       {skill.resourceCount > 0 && (
-        <span className="dsh-skh-editorNote">此技能还有 {skill.resourceCount} 个资源文件,这里只编辑 SKILL.md;资源用「打开目录」管理。</span>
+        <span className="dsh-skh-editorNote">{t('editor.resourceNote', { count: skill.resourceCount })}</span>
       )}
     </div>
     <textarea
       className="dsh-skh-textarea"
-      aria-label={`编辑 ${skill.name} 的 SKILL.md`}
+      aria-label={t('editor.aria', { name: skill.name })}
       value={draft}
       spellCheck={false}
       onChange={event => { setDraft(event.target.value) }}
@@ -562,19 +604,19 @@ function SkillEditor({ editing, run, openPath, onClose }: TabCommon & {
       }}
     />
     <div className="dsh-skh-editorActions">
-      {dirty && <span className="dsh-skh-dirty">● 有未保存的修改</span>}
+      {dirty && <span className="dsh-skh-dirty">{t('editor.dirty')}</span>}
       {confirmDiscard
         ? (
           <>
-            <Button size="sm" variant="primary" onClick={() => { save(); onClose() }}>保存并关闭</Button>
-            <Button size="sm" variant="ghost" className="dsh-skh-danger" onClick={onClose}>放弃修改</Button>
-            <Button size="sm" variant="outline" onClick={() => { setConfirmDiscard(false) }}>继续编辑</Button>
+            <Button size="sm" variant="primary" onClick={() => { save(); onClose() }}>{t('editor.saveAndClose')}</Button>
+            <Button size="sm" variant="ghost" className="dsh-skh-danger" onClick={onClose}>{t('editor.discard')}</Button>
+            <Button size="sm" variant="outline" onClick={() => { setConfirmDiscard(false) }}>{t('editor.continue')}</Button>
           </>
         )
         : (
           <>
-            <Button size="sm" variant="primary" disabled={!dirty} onClick={save}>保存</Button>
-            <Button size="sm" variant="outline" onClick={requestClose}>{dirty ? '关闭…' : '关闭'}</Button>
+            <Button size="sm" variant="primary" disabled={!dirty} onClick={save}>{t('editor.save')}</Button>
+            <Button size="sm" variant="outline" onClick={requestClose}>{dirty ? t('editor.closeDirty') : t('editor.close')}</Button>
           </>
         )}
     </div>
@@ -582,7 +624,7 @@ function SkillEditor({ editing, run, openPath, onClose }: TabCommon & {
 }
 
 /** 发现页:来源 chips(内联管理)+ 目录选择器 + 扫描结果(引用/复制/批量)。 */
-function DiscoverTab({ state, run, browseDirs }: TabCommon & {
+function DiscoverTab({ t, state, run, browseDirs }: TabCommon & {
   state: HubState | undefined
   browseDirs: ((dirPath: string) => Promise<BrowseResult>) | undefined
 }) {
@@ -608,40 +650,42 @@ function DiscoverTab({ state, run, browseDirs }: TabCommon & {
   }
 
   return <>
-    <div className="dsh-skh-chips" aria-label="扫描目录">
-      <span className="dsh-skh-meta">扫描目录:</span>
+    <div className="dsh-skh-chips" aria-label={t('discover.scanDirs')}>
+      <span className="dsh-skh-meta">{t('discover.scanDirsLabel')}</span>
       {sources.map(info => (
         <span key={info.path} className="dsh-skh-chip" data-missing={info.exists ? undefined : 'true'}
-          title={info.exists ? `${info.path}:${info.skillCount} 个技能(含已入库)` : `${info.path}:目录不存在或不可读`}>
+          title={info.exists
+            ? t('discover.chipTitle', { path: info.path, count: info.skillCount })
+            : t('discover.chipMissing', { path: info.path })}>
           <code>{info.path}</code>
-          <span className="dsh-skh-chip-count">{info.exists ? info.skillCount : '不存在'}</span>
-          <button type="button" className="dsh-skh-chip-remove" aria-label={`移除扫描目录 ${info.path}`}
+          <span className="dsh-skh-chip-count">{info.exists ? info.skillCount : t('discover.missing')}</span>
+          <button type="button" className="dsh-skh-chip-remove" aria-label={t('discover.removeSource', { path: info.path })}
             onClick={() => { saveSources(sources.filter(other => other.path !== info.path).map(other => other.path)) }}>✕</button>
         </span>
       ))}
-      {!addingSource && <Button size="sm" variant="outline" onClick={() => { setAddingSource(true) }}>＋ 目录</Button>}
+      {!addingSource && <Button size="sm" variant="outline" onClick={() => { setAddingSource(true) }}>{t('discover.addDir')}</Button>}
     </div>
     {addingSource && (
-      <SourcePicker browseDirs={browseDirs} onAdd={addSource} onClose={() => { setAddingSource(false) }} />
+      <SourcePicker t={t} browseDirs={browseDirs} onAdd={addSource} onClose={() => { setAddingSource(false) }} />
     )}
     <div className="dsh-skh-toolbar">
       {discoverable.length > 5 && (
-        <input className="dsh-skh-filter" placeholder="筛选可入库的技能…" aria-label="筛选可入库的技能"
+        <input className="dsh-skh-filter" placeholder={t('discover.filter')} aria-label={t('discover.filter')}
           value={filter} onChange={event => setFilter(event.target.value)} />
       )}
       {linkable.length > 1 && (
         <Button size="sm" variant="outline" onClick={() => {
           void run({ action: 'importLinkBatch', sourcePaths: linkable.map(item => item.sourcePath) }).catch(() => undefined)
-        }}>全部引用({linkable.length})</Button>
+        }}>{t('discover.linkAll', { count: linkable.length })}</Button>
       )}
     </div>
     <p className="dsh-skh-intro">
-      「<b>引用</b>」= 符号链接,一份文件两边生效,编辑即编辑来源(推荐);「<b>复制</b>」= 独立副本,与来源各自演化。入库即出现在「/」菜单。
+      {t('discover.introPre')}<b>{t('discover.link')}</b>{t('discover.introMid')}<b>{t('discover.copy')}</b>{t('discover.introPost')}
     </p>
     {discoverable.length === 0
-      ? <p className="dsh-skh-empty">扫描目录里没有可入库的新技能(已入库的不重复列出)。</p>
+      ? <p className="dsh-skh-empty">{t('discover.empty')}</p>
       : shown.length === 0
-        ? <p className="dsh-skh-empty">没有匹配「{filter}」的技能。</p>
+        ? <p className="dsh-skh-empty">{t('filter.noMatch', { filter })}</p>
         : (
           <ul className="dsh-skh-cards">
             {shown.map(item => (
@@ -649,20 +693,20 @@ function DiscoverTab({ state, run, browseDirs }: TabCommon & {
                 <div className="dsh-skh-rowHead">
                   <span className="dsh-skh-rowIdentity">
                     <span className="dsh-skh-rowName"><code>/{item.name}</code></span>
-                    {item.kind === 'archive' && <span className="dsh-skh-tag">.skill 包 · 仅可复制</span>}
+                    {item.kind === 'archive' && <span className="dsh-skh-tag">{t('discover.archiveOnly')}</span>}
                   </span>
                   <span className="dsh-skh-rowActions">
                     {item.kind !== 'archive' && (
                       <Button size="sm" variant="primary" onClick={() => {
                         void run({ action: 'importLink', sourcePath: item.sourcePath }).catch(() => undefined)
-                      }}>引用</Button>
+                      }}>{t('discover.link')}</Button>
                     )}
                     <Button size="sm" variant={item.kind === 'archive' ? 'primary' : 'outline'} onClick={() => {
                       void run({ action: 'importCopy', sourcePath: item.sourcePath }).catch(() => undefined)
-                    }}>复制</Button>
+                    }}>{t('discover.copy')}</Button>
                   </span>
                 </div>
-                <ClampedDescription text={item.description} />
+                <ClampedDescription t={t} text={item.description} />
                 <p className="dsh-skh-meta">{shortPath(item.sourcePath)}</p>
               </li>
             ))}
@@ -672,7 +716,8 @@ function DiscoverTab({ state, run, browseDirs }: TabCommon & {
 }
 
 /** 目录选择器:常见位置一键添加 + 逐级浏览 + 手输兜底。 */
-function SourcePicker({ browseDirs, onAdd, onClose }: {
+function SourcePicker({ t, browseDirs, onAdd, onClose }: {
+  t: T
   browseDirs: ((dirPath: string) => Promise<BrowseResult>) | undefined
   onAdd: (path: string) => void
   onClose: () => void
@@ -686,8 +731,8 @@ function SourcePicker({ browseDirs, onAdd, onClose }: {
     setError(undefined)
     void browseDirs(dirPath)
       .then(result => { setView(result) })
-      .catch((err: unknown) => { setError(err instanceof Error ? err.message : String(err)) })
-  }, [browseDirs])
+      .catch(() => { setError(t('picker.browseFailed', { path: dirPath === '' ? '~' : dirPath })) })
+  }, [browseDirs, t])
 
   useEffect(() => { browse('') }, [browse])
 
@@ -698,18 +743,18 @@ function SourcePicker({ browseDirs, onAdd, onClose }: {
   return (
     <section className="dsh-skh-editor">
       <div className="dsh-skh-blockTitle">
-        选择扫描目录
+        {t('picker.title')}
         <span style={{ marginLeft: 'auto' }} />
-        <Button size="sm" variant="outline" onClick={onClose}>取消</Button>
+        <Button size="sm" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
       </div>
       {view?.suggestions !== undefined && view.suggestions.length > 0 && (
         <div className="dsh-skh-chips">
-          <span className="dsh-skh-meta">常见位置:</span>
+          <span className="dsh-skh-meta">{t('picker.common')}</span>
           {view.suggestions.map(item => (
             <button key={item.path} type="button" className="dsh-skh-chip" style={{ cursor: 'pointer' }}
-              title={`添加 ${item.path}`} onClick={() => { onAdd(item.path) }}>
+              title={t('picker.addTitle', { path: item.path })} onClick={() => { onAdd(item.path) }}>
               <code>{item.path}</code>
-              <span className="dsh-skh-chip-count">{item.skillCount} 个技能</span>
+              <span className="dsh-skh-chip-count">{t('picker.skillCount', { count: item.skillCount })}</span>
               <span aria-hidden="true">＋</span>
             </button>
           ))}
@@ -720,22 +765,22 @@ function SourcePicker({ browseDirs, onAdd, onClose }: {
         <>
           <div className="dsh-skh-toolbar">
             <Button size="sm" variant="outline" disabled={view.parent === undefined}
-              onClick={() => { if (view.parent !== undefined) browse(view.parent) }}>↑ 上一级</Button>
+              onClick={() => { if (view.parent !== undefined) browse(view.parent) }}>{t('picker.parent')}</Button>
             <span className="dsh-skh-meta" style={{ flex: 1, overflowWrap: 'anywhere' }}><code>{view.display}</code></span>
-            <Button size="sm" variant="primary" onClick={() => { onAdd(view.display) }}>把这个目录加为来源</Button>
+            <Button size="sm" variant="primary" onClick={() => { onAdd(view.display) }}>{t('picker.addCurrent')}</Button>
           </div>
           <ul className="dsh-skh-cards" style={{ gap: 2, maxHeight: 260, overflowY: 'auto' }}>
-            {view.dirs.length === 0 && <li className="dsh-skh-empty">没有子目录。</li>}
+            {view.dirs.length === 0 && <li className="dsh-skh-empty">{t('picker.noSubdirs')}</li>}
             {view.dirs.map(dir => (
               <li key={dir.name} className="dsh-skh-rowHead" style={{ padding: '4px 6px' }}>
                 <button type="button" className="dsh-skh-link" style={{ fontSize: 13 }}
                   onClick={() => { browse(`${view.display === '~' ? '~' : view.display}/${dir.name}`) }}>
                   {dir.name}/
                 </button>
-                {dir.skillCount > 0 && <span className="dsh-skh-tag">{dir.skillCount} 个技能</span>}
+                {dir.skillCount > 0 && <span className="dsh-skh-tag">{t('picker.skillCount', { count: dir.skillCount })}</span>}
                 <span className="dsh-skh-rowActions">
                   <Button size="sm" variant={dir.skillCount > 0 ? 'primary' : 'outline'}
-                    onClick={() => { onAdd(childPath(dir.name)) }}>添加</Button>
+                    onClick={() => { onAdd(childPath(dir.name)) }}>{t('picker.add')}</Button>
                 </span>
               </li>
             ))}
@@ -743,11 +788,11 @@ function SourcePicker({ browseDirs, onAdd, onClose }: {
         </>
       )}
       <div className="dsh-skh-addRow">
-        <input className="dsh-skh-filter" style={{ flex: 1 }} placeholder="或直接输入路径:~/some/skills"
-          aria-label="手动输入扫描目录" value={manual}
+        <input className="dsh-skh-filter" style={{ flex: 1 }} placeholder={t('picker.manualPlaceholder')}
+          aria-label={t('picker.manualAria')} value={manual}
           onChange={event => setManual(event.target.value)}
           onKeyDown={event => { if (event.key === 'Enter' && manual.trim() !== '') onAdd(manual) }} />
-        <Button size="sm" variant="outline" disabled={manual.trim() === ''} onClick={() => { onAdd(manual) }}>添加</Button>
+        <Button size="sm" variant="outline" disabled={manual.trim() === ''} onClick={() => { onAdd(manual) }}>{t('picker.add')}</Button>
       </div>
     </section>
   )

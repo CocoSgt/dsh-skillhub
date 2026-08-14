@@ -12,20 +12,15 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { BrowseResult, HubCommand, HubCommandResult, HubState } from '../index.js'
 import { SkillHubSection } from './SkillHubSection.tsx'
+import { NS, en, setBoundT, tr, zh } from './locales.ts'
 
 export { SkillHubSection } from './SkillHubSection.tsx'
 
 /** ctx.locale 的最小面:注册词典 + 绑定翻译函数(官方设置页同一机制)。 */
 interface LocaleFace {
   register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): unknown
-  bind(ns: string): (key: string) => string
+  bind(ns: string): (key: string, params?: Record<string, unknown>) => string
 }
-
-/** 词典命名空间。 */
-const NS = 'dsh-skill-hub'
-
-const en = { nav: 'Skills' }
-const zh = { nav: '技能' }
 
 interface ApiClient {
   host: {
@@ -101,7 +96,7 @@ export const inject = ['slots', 'remote']
 export async function apply(ctx: ClientContext): Promise<void> {
   const remote = (ctx as unknown as { remote: RemoteFace }).remote
   const disposeRemote = await remote.$mount({ package: 'dsh-skill-hub', descriptors: DESCRIPTORS })
-  ctx.effect(() => () => { void disposeRemote() }, 'dsh-skill-hub: 远端描述符挂载')
+  ctx.effect(() => () => { void disposeRemote() }, 'dsh-skill-hub: remote descriptor mount')
 
   let calls: SkillHubCalls | undefined
   ctx.inject(['remote', 'remote.skillHub'], (namespaceCtx: ClientContext): void => {
@@ -110,15 +105,15 @@ export async function apply(ctx: ClientContext): Promise<void> {
 
   const api = {
     getState: async (): Promise<HubState> => {
-      if (calls === undefined) throw new Error('skillHub 服务未就绪')
+      if (calls === undefined) throw new Error(tr('svc.unready'))
       return unwrap(await calls.getState())
     },
     runCommand: async (command: HubCommand): Promise<HubCommandResult> => {
-      if (calls === undefined) throw new Error('skillHub 服务未就绪')
+      if (calls === undefined) throw new Error(tr('svc.unready'))
       return unwrap(await calls.runCommand(command))
     },
     browseDirs: async (dirPath: string): Promise<BrowseResult> => {
-      if (calls === undefined) throw new Error('skillHub 服务未就绪')
+      if (calls === undefined) throw new Error(tr('svc.unready'))
       return unwrap(await calls.browseDirs(dirPath))
     },
   }
@@ -130,19 +125,22 @@ export async function apply(ctx: ClientContext): Promise<void> {
     } catch { /* connection 未就绪时静默忽略 */ }
   }
 
-  // 导航标签走官方 locale 服务:英文界面显示 Skills,中文显示 技能。
+  // 全部可见文案走官方 locale 服务:注册 zh/en 词典,槽位声明 locale: NS
+  // 后框架会把随 locale 切换重推导的 t 席位注入组件 props。
   ctx.inject(['locale'], (localeCtx: ClientContext) => {
     const locale = (localeCtx as unknown as { locale: LocaleFace }).locale
     ctx.effect(() => {
       const dispose = locale.register(NS, { zh, en })
       return () => { if (typeof dispose === 'function') dispose() }
-    }, 'dsh-skill-hub: 词典注册')
+    }, 'dsh-skill-hub: dictionary registration')
     const t = locale.bind(NS)
+    setBoundT(t)
     ctx.slots.inject('settings.section', () => ctx.slots.register({
       name: 'settings.section',
       id: 'skills',
       order: 25,
       label: () => t('nav'),
+      locale: NS,
       inject: () => ({ openPath, api }),
     }, SkillHubSection))
   })

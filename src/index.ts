@@ -15,8 +15,9 @@
  *
  * 传输:此前的环回 sidecar HTTP 服务已移除,改为 TypertRemoteService +
  * 弱(src-json)清单注册(第三方双副本下 SRC 发现失明,原因与
- * dsh-context-inspector 相同)。暴露 `skillHub/getState|runCommand` 两个
- * RPC;runCommand 的负载是既有的命令联合,src-json 原样过 wire。
+ * dsh-context-inspector 相同)。暴露 `skillHub/getState|runCommand|browseDirs`
+ * 三个 RPC(browseDirs 供来源选择器逐级浏览目录);runCommand 的负载是
+ * 既有的命令联合,src-json 原样过 wire。
  *
  * 重要:Gateway 按参数名生成 wire 字段,公开方法保持简单标识符参数。
  * 不使用 @Remote 装饰器:第三方双副本下宿主读不到本副本的装饰器标记
@@ -130,8 +131,28 @@ export interface BrowseResult {
 
 /** runCommand 的返回。 */
 export interface HubCommandResult {
+  /**
+   * 稳定结果码(点分,如 'import.linked' / 'err.read.notFound'):客户端据此
+   * 取本地化文案;message 保留为中文回退,保证 wire 向后兼容。
+   */
+  code?: string
+  /** code 对应文案的 {占位符} 参数。 */
+  params?: Record<string, unknown>
+  /** 显式语气:'error' 时客户端标红(替代对 message 文案的正则猜测);缺省 idle。 */
+  level?: 'error'
+  /** 中文回退文案(恒有值;src-json 不允许 undefined,可选字段按需展开)。 */
   message: string
   state: HubState
+  body?: { name: string, content: string }
+  archiveBase64?: string
+}
+
+/** execute 及各导入助手的统一结果:code 必填,错误路径带 level: 'error'。 */
+interface ExecOutcome {
+  code: string
+  message: string
+  params?: Record<string, unknown>
+  level?: 'error'
   body?: { name: string, content: string }
   archiveBase64?: string
 }
@@ -480,12 +501,15 @@ export class SkillHubGateway extends TypertRemoteService {
     return await this.buildState('')
   }
 
-  /** 执行一条面板命令,返回消息 + 刷新后的全量状态。 */
+  /** 执行一条面板命令,返回结果码/消息 + 刷新后的全量状态。 */
   async runCommand(command: HubCommand): Promise<HubCommandResult> {
     const result = await this.execute(command)
     return {
+      code: result.code,
       message: result.message,
       state: await this.buildState(result.message),
+      ...result.params === undefined ? {} : { params: result.params },
+      ...result.level === undefined ? {} : { level: result.level },
       ...result.body === undefined ? {} : { body: result.body },
       ...result.archiveBase64 === undefined ? {} : { archiveBase64: result.archiveBase64 },
     }
@@ -845,7 +869,7 @@ export class SkillHubGateway extends TypertRemoteService {
   }
 
   /** 安装 .skill 包(只能复制):整树解压到 skills/<name>/。 */
-  private async installArchive(entries: ZipEntry[], fallbackName: string, source: string): Promise<{ message: string }> {
+  private async installArchive(entries: ZipEntry[], fallbackName: string, source: string): Promise<ExecOutcome> {
     let name = fallbackName
     const skillMd = findSkillMd(entries)
     if (skillMd !== undefined) {
@@ -857,11 +881,11 @@ export class SkillHubGateway extends TypertRemoteService {
       await extractZip(entries, path.join(this.skillsDir, name))
     } catch (error) {
       this.ctx.logger.warn(error)
-      return { message: `入库失败:${error instanceof Error ? error.message : String(error)}` }
+      return { code: 'err.archive.extract', level: 'error', message: `入库失败:${error instanceof Error ? error.message : String(error)}` }
     }
     await this.syncFrontmatterName(path.join(this.skillsDir, name), name)
     await this.recordSkill(name, source, 'copy')
-    return { message: `已复制入库「${name}」(含全部资源文件)` }
+    return { code: 'import.copied', params: { name }, message: `已复制入库「${name}」(含全部资源文件)` }
   }
 
   /** 递归收集技能目录为 zip 条目(`<name>/<相对路径>`)。 */
@@ -882,18 +906,18 @@ export class SkillHubGateway extends TypertRemoteService {
   }
 
   /** 引用入库:skills/<name> 符号链接 → 来源目录/文件。 */
-  private async importLink(sourcePath: string): Promise<{ message: string }> {
+  private async importLink(sourcePath: string): Promise<ExecOutcome> {
     if (sourcePath === '' || !await this.sourceAllowed(sourcePath)) {
-      return { message: '引用失败:来源路径不在配置的来源目录内' }
+      return { code: 'err.link.source', level: 'error', message: '引用失败:来源路径不在配置的来源目录内' }
     }
     let info
     try {
       info = await stat(sourcePath)
     } catch {
-      return { message: '引用失败:无法读取来源' }
+      return { code: 'err.link.unreadable', level: 'error', message: '引用失败:无法读取来源' }
     }
     if (sourcePath.endsWith('.skill')) {
-      return { message: '打包技能(.skill)没有可引用的目录,请用「复制」入库' }
+      return { code: 'err.link.archive', level: 'error', message: '打包技能(.skill)没有可引用的目录,请用「复制」入库' }
     }
     // 名字取 frontmatter(目录读 SKILL.md;平铺读文件本身)
     let name = normalizeName(path.basename(sourcePath).replace(/\.md$/iu, ''))
@@ -919,26 +943,28 @@ export class SkillHubGateway extends TypertRemoteService {
       if (process.platform === 'win32' && info.isFile()) {
         await cp(sourcePath, linkPath, { dereference: true })
         await this.recordSkill(linkKey, sourcePath, 'copy')
-        return { message: `此平台无法创建文件符号链接,「${name}」已改为复制入库` }
+        return { code: 'import.fallbackCopy', params: { name }, message: `此平台无法创建文件符号链接,「${name}」已改为复制入库` }
       }
-      return { message: `引用失败:${error instanceof Error ? error.message : String(error)}` }
+      return { code: 'err.link.symlink', level: 'error', params: { message: error instanceof Error ? error.message : String(error) }, message: `引用失败:${error instanceof Error ? error.message : String(error)}` }
     }
     await this.recordSkill(linkKey, sourcePath, 'link')
-    const note = collides ? `;注意:库里已有同名技能,同名时只有一个会生效` : ''
-    return { message: `已引用「${name}」→ ${sourcePath}(编辑即编辑来源;新会话立即可用,已打开的会话刷新页面后 / 菜单可见)${note}` }
+    if (collides) {
+      return { code: 'import.linked.dup', params: { name, path: sourcePath }, message: `已引用「${name}」→ ${sourcePath}(编辑即编辑来源;新会话立即可用,已打开的会话刷新页面后 / 菜单可见);注意:库里已有同名技能,同名时只有一个会生效` }
+    }
+    return { code: 'import.linked', params: { name, path: sourcePath }, message: `已引用「${name}」→ ${sourcePath}(编辑即编辑来源;新会话立即可用,已打开的会话刷新页面后 / 菜单可见)` }
   }
 
   /** 复制入库(目录整树 / .skill 解压 / 平铺 .md 清洗)。 */
-  private async importCopy(sourcePath: string): Promise<{ message: string }> {
+  private async importCopy(sourcePath: string): Promise<ExecOutcome> {
     if (sourcePath === '' || !await this.sourceAllowed(sourcePath)) {
-      return { message: '复制失败:来源路径不在配置的来源目录内' }
+      return { code: 'err.copy.source', level: 'error', message: '复制失败:来源路径不在配置的来源目录内' }
     }
     let info
     try {
       info = await stat(sourcePath)
     } catch (error) {
       this.ctx.logger.warn(error)
-      return { message: '复制失败:无法读取来源' }
+      return { code: 'err.copy.unreadable', level: 'error', message: '复制失败:无法读取来源' }
     }
     if (info.isDirectory()) {
       let name = normalizeName(path.basename(sourcePath))
@@ -951,11 +977,11 @@ export class SkillHubGateway extends TypertRemoteService {
         await cp(sourcePath, path.join(this.skillsDir, finalName), { recursive: true, dereference: true })
       } catch (error) {
         this.ctx.logger.warn(error)
-        return { message: '复制失败:拷贝技能目录出错' }
+        return { code: 'err.copy.dir', level: 'error', message: '复制失败:拷贝技能目录出错' }
       }
       await this.syncFrontmatterName(path.join(this.skillsDir, finalName), finalName)
       await this.recordSkill(finalName, sourcePath, 'copy')
-      return { message: `已复制入库「${finalName}」(含全部资源文件)` }
+      return { code: 'import.copied', params: { name: finalName }, message: `已复制入库「${finalName}」(含全部资源文件)` }
     }
     if (sourcePath.endsWith('.skill')) {
       let entries: ZipEntry[]
@@ -963,7 +989,7 @@ export class SkillHubGateway extends TypertRemoteService {
         entries = readZip(await readFile(sourcePath))
       } catch (error) {
         this.ctx.logger.warn(error)
-        return { message: `复制失败:${error instanceof Error ? error.message : String(error)}` }
+        return { code: 'err.copy.archive', level: 'error', params: { message: error instanceof Error ? error.message : String(error) }, message: `复制失败:${error instanceof Error ? error.message : String(error)}` }
       }
       return await this.installArchive(entries, normalizeName(path.basename(sourcePath).replace(/\.skill$/iu, '')), sourcePath)
     }
@@ -972,82 +998,89 @@ export class SkillHubGateway extends TypertRemoteService {
       text = await readFile(sourcePath, 'utf8')
     } catch (error) {
       this.ctx.logger.warn(error)
-      return { message: '复制失败:无法读取来源文件' }
+      return { code: 'err.copy.readFile', level: 'error', message: '复制失败:无法读取来源文件' }
     }
     const parsed = parseSkillText(text, path.basename(sourcePath).replace(/\.md$/iu, ''), '')
     const name = await this.uniqueName(parsed.name)
     await mkdir(path.join(this.skillsDir, name), { recursive: true })
     await writeFile(path.join(this.skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
     await this.recordSkill(name, sourcePath, 'copy')
-    return { message: `已复制入库「${name}」` }
+    return { code: 'import.copiedMd', params: { name }, message: `已复制入库「${name}」` }
   }
 
-  private async execute(cmd: HubCommand): Promise<{ message: string, body?: { name: string, content: string }, archiveBase64?: string }> {
+  private async execute(cmd: HubCommand): Promise<ExecOutcome> {
     switch (cmd.action) {
       case 'rescan':
-        return { message: '已刷新技能列表' }
+        return { code: 'rescan.done', message: '已刷新技能列表' }
       case 'importLink':
         return await this.importLink(cmd.sourcePath ?? '')
       case 'importLinkBatch': {
         const sourcePaths = cmd.sourcePaths ?? []
-        if (sourcePaths.length === 0) return { message: '批量引用:没有收到来源' }
+        if (sourcePaths.length === 0) return { code: 'import.batch.empty', level: 'error', message: '批量引用:没有收到来源' }
         let linked = 0
         const failures: string[] = []
         for (const sourcePath of sourcePaths) {
           const result = await this.importLink(sourcePath)
-          if (result.message.startsWith('已引用')) linked += 1
+          if (result.level === undefined) linked += 1
           else failures.push(result.message)
         }
-        const failNote = failures.length > 0 ? `;${failures.length} 个失败(${failures[0]!})` : ''
-        return { message: `批量引用完成:${linked}/${sourcePaths.length} 个入库${failNote}` }
+        if (failures.length > 0) {
+          return {
+            code: 'import.batch.doneWithFail',
+            level: 'error',
+            params: { linked, total: sourcePaths.length, failCount: failures.length, firstFail: failures[0]! },
+            message: `批量引用完成:${linked}/${sourcePaths.length} 个入库;${failures.length} 个失败(${failures[0]!})`,
+          }
+        }
+        return { code: 'import.batch.done', params: { linked, total: sourcePaths.length }, message: `批量引用完成:${linked}/${sourcePaths.length} 个入库` }
       }
       case 'importCopy':
         return await this.importCopy(cmd.sourcePath ?? '')
       case 'importArchive': {
         const archiveBase64 = cmd.archiveBase64 ?? ''
-        if (archiveBase64 === '') return { message: '入库失败:没有收到文件内容' }
+        if (archiveBase64 === '') return { code: 'err.archive.empty', level: 'error', message: '入库失败:没有收到文件内容' }
         let entries: ZipEntry[]
         try {
           entries = readZip(Buffer.from(archiveBase64, 'base64'))
         } catch (error) {
           this.ctx.logger.warn(error)
-          return { message: `入库失败:${error instanceof Error ? error.message : String(error)}` }
+          return { code: 'err.archive.invalid', level: 'error', params: { message: error instanceof Error ? error.message : String(error) }, message: `入库失败:${error instanceof Error ? error.message : String(error)}` }
         }
         const fallbackName = normalizeName((cmd.name ?? '').replace(/\.skill$/iu, ''))
         return await this.installArchive(entries, fallbackName, 'upload')
       }
       case 'importPaste': {
         const content = cmd.content ?? ''
-        if (content.trim() === '') return { message: '创建失败:内容为空' }
+        if (content.trim() === '') return { code: 'err.paste.empty', level: 'error', message: '创建失败:内容为空' }
         const parsed = parseSkillText(content, cmd.name ?? '', cmd.description ?? '')
         const name = await this.uniqueName(parsed.name)
         await mkdir(path.join(this.skillsDir, name), { recursive: true })
         await writeFile(path.join(this.skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
         await this.recordSkill(name, 'paste', 'local')
-        return { message: `已创建技能「${name}」` }
+        return { code: 'import.created', params: { name }, message: `已创建技能「${name}」` }
       }
       case 'read': {
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '读取失败:技能名不合法' }
+        if (!NAME_PATTERN.test(name)) return { code: 'err.read.invalid', level: 'error', message: '读取失败:技能名不合法' }
         const file = await this.existingPath(name)
-        if (file === undefined) return { message: `读取失败:找不到技能「${name}」` }
-        return { message: `已读取「${name}」`, body: { name, content: await readFile(file, 'utf8') } }
+        if (file === undefined) return { code: 'err.read.notFound', level: 'error', params: { name }, message: `读取失败:找不到技能「${name}」` }
+        return { code: 'read.done', params: { name }, message: `已读取「${name}」`, body: { name, content: await readFile(file, 'utf8') } }
       }
       case 'save': {
         // 保存 = 字节原样写回 SKILL.md(引用技能写穿链接,直达来源)。
         // 不再经清洗管线:编辑器所见即落盘内容。
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '保存失败:技能名不合法' }
+        if (!NAME_PATTERN.test(name)) return { code: 'err.save.invalid', level: 'error', message: '保存失败:技能名不合法' }
         const file = await this.existingPath(name)
-        if (file === undefined) return { message: `保存失败:找不到技能「${name}」` }
+        if (file === undefined) return { code: 'err.save.notFound', level: 'error', params: { name }, message: `保存失败:找不到技能「${name}」` }
         await writeFile(file, cmd.content ?? '', 'utf8')
-        return { message: `已保存「${name}」` }
+        return { code: 'save.done', params: { name }, message: `已保存「${name}」` }
       }
       case 'delete': {
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '删除失败:技能名不合法' }
+        if (!NAME_PATTERN.test(name)) return { code: 'err.delete.invalid', level: 'error', message: '删除失败:技能名不合法' }
         const entry = await this.entryPath(name)
-        if (entry === undefined) return { message: `删除失败:找不到技能「${name}」` }
+        if (entry === undefined) return { code: 'err.delete.notFound', level: 'error', params: { name }, message: `删除失败:找不到技能「${name}」` }
         const linkInfo = await lstat(entry)
         const state = await this.readState()
         const key = path.basename(entry).replace(/\.md$/u, '')
@@ -1058,7 +1091,7 @@ export class SkillHubGateway extends TypertRemoteService {
             delete state.skills[key]
             await this.writeState(state)
           }
-          return { message: `已移除引用「${name}」(来源文件未动)` }
+          return { code: 'delete.removedLink', params: { name }, message: `已移除引用「${name}」(来源文件未动)` }
         }
         await mkdir(this.trashDir, { recursive: true })
         await rename(entry, path.join(this.trashDir, `${Date.now()}-${name}`))
@@ -1066,13 +1099,13 @@ export class SkillHubGateway extends TypertRemoteService {
           delete state.skills[key]
           await this.writeState(state)
         }
-        return { message: `已删除「${name}」(可在 skill-trash 目录找回)` }
+        return { code: 'delete.done', params: { name }, message: `已删除「${name}」(可在 skill-trash 目录找回)` }
       }
       case 'export': {
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '导出失败:技能名不合法' }
+        if (!NAME_PATTERN.test(name)) return { code: 'err.export.invalid', level: 'error', message: '导出失败:技能名不合法' }
         const file = await this.existingPath(name)
-        if (file === undefined) return { message: `导出失败:找不到技能「${name}」` }
+        if (file === undefined) return { code: 'err.export.notFound', level: 'error', params: { name }, message: `导出失败:找不到技能「${name}」` }
         try {
           const dir = path.dirname(file)
           const isBundle = path.basename(dir) !== path.basename(this.skillsDir)
@@ -1080,26 +1113,26 @@ export class SkillHubGateway extends TypertRemoteService {
             ? await this.collectTree(dir, name)
             : [{ name: `${name}/SKILL.md`, data: await readFile(file) }]
           if (!entries.some(entry => entry.name === `${name}/SKILL.md` || entry.name === `${name}/skill.md`)) {
-            return { message: `导出失败:「${name}」缺少 SKILL.md` }
+            return { code: 'err.export.noSkillMd', level: 'error', params: { name }, message: `导出失败:「${name}」缺少 SKILL.md` }
           }
-          return { message: `已导出「${name}」为 .skill 包`, archiveBase64: writeZip(entries).toString('base64') }
+          return { code: 'export.done', params: { name }, message: `已导出「${name}」为 .skill 包`, archiveBase64: writeZip(entries).toString('base64') }
         } catch (error) {
           this.ctx.logger.warn(error)
-          return { message: '导出失败:打包出错' }
+          return { code: 'err.export.failed', level: 'error', message: '导出失败:打包出错' }
         }
       }
       case 'setSources': {
         const sources = cmd.sources ?? []
         if (sources.some(s => typeof s !== 'string' || s.trim() === '')) {
-          return { message: '保存失败:来源目录列表不合法' }
+          return { code: 'err.sources.invalid', level: 'error', message: '保存失败:来源目录列表不合法' }
         }
         const state = await this.readState()
         state.sources = sources
         await this.writeState(state)
-        return { message: '已保存来源配置' }
+        return { code: 'sources.saved', message: '已保存来源配置' }
       }
       default:
-        return { message: '未知命令' }
+        return { code: 'err.unknown', level: 'error', message: '未知命令' }
     }
   }
 
