@@ -104,8 +104,26 @@ GitHub fallback:
 dsh plugin --profile web add github:CocoSgt/dsh-skills
 ```
 
+> Note: a self-built profile's `~/.dsh/profiles/<name>/package.json` must list
+> `@deepseek-ai/dsh-base` and `@deepseek-ai/dsh-web-app` in
+> `dsh.profile.bundles`, otherwise startup hangs silently.
+
 Restart `dsh web` afterwards. Uninstall:
 `dsh plugin --profile web remove dsh-skills`.
+
+## Companion plugins
+
+The other two plugins from the same suite:
+
+- [dsh-attachments](https://github.com/CocoSgt/dsh-attachments)
+  ([npm](https://www.npmjs.com/package/dsh-attachments)) — bring any file
+  into the conversation as cards above the composer; the model reads images
+  by path via `read_image`, so even non-vision models are never blocked.
+- [dsh-inspector](https://github.com/CocoSgt/dsh-inspector)
+  ([npm](https://www.npmjs.com/package/dsh-inspector)) — an "Instruction
+  Files" panel showing the exact AGENTS.md/CLAUDE.md instruction chain in
+  effect for the session, in real load order, with in-place editing and
+  skill-root status.
 
 ## Known limitations
 

@@ -88,7 +88,21 @@ GitHub 回退方式:
 dsh plugin --profile web add github:CocoSgt/dsh-skills
 ```
 
+> 注意:自建 profile 的 `~/.dsh/profiles/<name>/package.json` 里
+> `dsh.profile.bundles` 必须包含 `@deepseek-ai/dsh-base` 与
+> `@deepseek-ai/dsh-web-app`,否则启动会静默挂起。
+
 安装后重启 `dsh web`。卸载:`dsh plugin --profile web remove dsh-skills`。
+
+## 同系列插件
+
+- [dsh-attachments](https://github.com/CocoSgt/dsh-attachments)
+  ([npm](https://www.npmjs.com/package/dsh-attachments))——附件注入:把任何
+  文件带进会话成卡;模型用 `read_image` 按路径读图,非视觉模型也不受阻。
+- [dsh-inspector](https://github.com/CocoSgt/dsh-inspector)
+  ([npm](https://www.npmjs.com/package/dsh-inspector))——约束文件面板:按
+  harness 真实载入顺序查看/就地编辑当前会话的 AGENTS.md/CLAUDE.md 指引链,
+  附四个技能根状态。
 
 ## 已知限制
 
