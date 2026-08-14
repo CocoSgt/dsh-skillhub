@@ -49,6 +49,8 @@ interface CommandResponse {
   error?: string
   status: StatusValue
   body?: { name: string, content: string }
+  /** export 命令返回：.skill 包（zip）全文的 base64。 */
+  archiveBase64?: string
 }
 
 /** 与宿主 half 的 PORT_RANGE 保持一致。 */
@@ -210,7 +212,7 @@ export function SkillManagerSection({ openPath }: SkillManagerSectionProps) {
   const tabs = useMemo(() => ([
     { id: 'installed' as const, label: `已安装 (${status?.installed.length ?? 0})` },
     { id: 'importable' as const, label: `可导入 (${status?.importable.length ?? 0})` },
-    { id: 'paste' as const, label: '粘贴导入' },
+    { id: 'paste' as const, label: '粘贴 / 上传' },
     { id: 'sources' as const, label: '来源' },
   ]), [status])
 
@@ -239,6 +241,18 @@ export function SkillManagerSection({ openPath }: SkillManagerSectionProps) {
 
 interface TabCommon {
   run: (command: Record<string, unknown>) => Promise<CommandResponse>
+}
+
+/** base64 → Blob 下载 .skill 包。 */
+function downloadArchive(name: string, archiveBase64: string): void {
+  const bytes = Uint8Array.from(atob(archiveBase64), char => char.charCodeAt(0))
+  const blob = new Blob([bytes], { type: 'application/zip' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${name}.skill`
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 function InstalledTab({ status, editing, setEditing, run, startEdit, openPath }: {
@@ -287,6 +301,13 @@ function InstalledTab({ status, editing, setEditing, run, startEdit, openPath }:
         <div className="dsh-skm-actions">
           <button type="button" className="dsh-skm-btn" onClick={() => void startEdit(skill)}>编辑</button>
           <button type="button" className="dsh-skm-btn" onClick={() => {
+            void run({ action: 'export', name: skill.name })
+              .then(response => {
+                if (response.archiveBase64 !== undefined) downloadArchive(skill.name, response.archiveBase64)
+              })
+              .catch(() => undefined)
+          }}>导出 .skill</button>
+          <button type="button" className="dsh-skm-btn" onClick={() => {
             void navigator.clipboard?.writeText(`/${skill.name}`).catch(() => undefined)
           }}>复制 /{skill.name}</button>
           <button type="button" className="dsh-skm-btn" onClick={() => {
@@ -331,7 +352,33 @@ function PasteTab({ run }: TabCommon) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
+  const [uploadName, setUploadName] = useState('')
+  const [uploadBase64, setUploadBase64] = useState('')
+
+  /** 读 .skill 文件为 base64，暂存待导入（名称取包内 frontmatter，文件名只是兜底）。 */
+  const onPickArchive = (file: File | undefined): void => {
+    if (file === undefined) return
+    setUploadName(file.name)
+    const reader = new FileReader()
+    reader.addEventListener('load', () => {
+      const result = typeof reader.result === 'string' ? reader.result : ''
+      setUploadBase64(result.includes(',') ? result.split(',').slice(1).join(',') : '')
+    })
+    reader.readAsDataURL(file)
+  }
+
   return <div>
+    <label className="dsh-skm-label" htmlFor="dsh-skm-paste-archive">上传 .skill 包（Claude 网页版导出格式，含资源文件整包导入）</label>
+    <input id="dsh-skm-paste-archive" className="dsh-skm-input" type="file" accept=".skill,.zip"
+      onChange={event => onPickArchive(event.target.files?.[0])} />
+    {uploadBase64 !== '' && <div className="dsh-skm-actions">
+      <button type="button" className="dsh-skm-btn" onClick={() => {
+        void run({ action: 'importArchive', name: uploadName, archiveBase64: uploadBase64 })
+          .then(() => { setUploadBase64(''); setUploadName('') })
+          .catch(() => undefined)
+      }}>导入 {uploadName}</button>
+      <button type="button" className="dsh-skm-btn" onClick={() => { setUploadBase64(''); setUploadName('') }}>取消</button>
+    </div>}
     <label className="dsh-skm-label" htmlFor="dsh-skm-paste-name">技能名称</label>
     <input id="dsh-skm-paste-name" className="dsh-skm-input" placeholder="my-skill（可留空，从内容推断）"
       value={name} onChange={event => setName(event.target.value)} />
