@@ -163,6 +163,13 @@ interface ZipEntry {
   data: Buffer
 }
 
+/** 单个 zip 条目解压后的上限(64MB):inflate 前先查中央目录声明,inflate 后再兜底复查。 */
+const ZIP_ENTRY_LIMIT = 64 * 1024 * 1024
+/** 全部条目解压后的累计上限(256MB):防「千刀万剐」式多小条目炸弹。 */
+const ZIP_TOTAL_LIMIT = 256 * 1024 * 1024
+/** importArchive 上传 base64 的长度上限(64MB 字符 ≈ 48MB 二进制)。 */
+const ARCHIVE_BASE64_LIMIT = 64 * 1024 * 1024
+
 /** 极简 zip 读取:EOCD 定位中央目录,支持 stored(0)/deflate(8)。不做 ZIP64。 */
 function readZip(buffer: Buffer): ZipEntry[] {
   let eocd = -1
@@ -174,10 +181,13 @@ function readZip(buffer: Buffer): ZipEntry[] {
   const count = buffer.readUInt16LE(eocd + 10)
   let offset = buffer.readUInt32LE(eocd + 16)
   const out: ZipEntry[] = []
+  let totalSize = 0
   for (let n = 0; n < count; n++) {
     if (buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error('.skill 包中央目录损坏')
     const method = buffer.readUInt16LE(offset + 10)
     const compSize = buffer.readUInt32LE(offset + 20)
+    // 声明的解压后大小:inflate 前先按上限拦截(头部可伪造,inflate 后仍要复查)。
+    const uncompSize = buffer.readUInt32LE(offset + 24)
     const nameLen = buffer.readUInt16LE(offset + 28)
     const extraLen = buffer.readUInt16LE(offset + 30)
     const commentLen = buffer.readUInt16LE(offset + 32)
@@ -189,9 +199,33 @@ function readZip(buffer: Buffer): ZipEntry[] {
       const localExtraLen = buffer.readUInt16LE(localOffset + 28)
       const dataStart = localOffset + 30 + localNameLen + localExtraLen
       const compressed = buffer.subarray(dataStart, dataStart + compSize)
-      if (method === 0) out.push({ name, data: Buffer.from(compressed) })
-      else if (method === 8) out.push({ name, data: inflateRawSync(compressed) })
-      else throw new Error(`不支持的压缩方式 ${String(method)}(${name})`)
+      // 解压前:中央目录声明的解压后大小超限即拒(伪造小声明的情况由下面的兜底复查覆盖)。
+      if (uncompSize > ZIP_ENTRY_LIMIT || totalSize + uncompSize > ZIP_TOTAL_LIMIT) {
+        throw new Error(`zip 条目解压后超过上限:${name}`)
+      }
+      let data: Buffer
+      if (method === 0) {
+        data = Buffer.from(compressed)
+      } else if (method === 8) {
+        try {
+          // maxOutputLength 让 zlib 在越过上限时立即中断,不把整块炸弹灌进内存。
+          data = inflateRawSync(compressed, { maxOutputLength: ZIP_ENTRY_LIMIT + 1 })
+        } catch (error) {
+          // 头部声明偏小的真炸弹在此暴露;其余(损坏流等)错误原样透传。
+          if (error instanceof RangeError || (error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') {
+            throw new Error(`zip 条目解压后超过上限:${name}`)
+          }
+          throw error as Error
+        }
+      } else {
+        throw new Error(`不支持的压缩方式 ${String(method)}(${name})`)
+      }
+      // 解压后:实际大小复查(头部可撒谎),并累计总量。
+      if (data.length > ZIP_ENTRY_LIMIT || totalSize + data.length > ZIP_TOTAL_LIMIT) {
+        throw new Error(`zip 条目解压后超过上限:${name}`)
+      }
+      totalSize += data.length
+      out.push({ name, data })
     }
     offset += 46 + nameLen + extraLen + commentLen
   }
@@ -1039,6 +1073,10 @@ export class SkillHubGateway extends TypertRemoteService {
       case 'importArchive': {
         const archiveBase64 = cmd.archiveBase64 ?? ''
         if (archiveBase64 === '') return { code: 'err.archive.empty', level: 'error', message: '入库失败:没有收到文件内容' }
+        // 上传体积上限:64MB base64 字符 ≈ 48MB 二进制,超限直接拒绝(防 zip 炸弹窗口)。
+        if (archiveBase64.length > ARCHIVE_BASE64_LIMIT) {
+          return { code: 'err.archive.tooLarge', level: 'error', params: { limitMb: 48 }, message: '入库失败:文件超过 48MB 上限' }
+        }
         let entries: ZipEntry[]
         try {
           entries = readZip(Buffer.from(archiveBase64, 'base64'))
