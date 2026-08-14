@@ -441,11 +441,21 @@ export function apply(ctx: Context): void {
     return { message, installed, importable: await scanImportable(sources, installed) }
   }
 
-  function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  /**
+   * CORS 回显：originAllowed 已把 Origin 限定为本机环回地址，这里必须
+   * 原样回显该值——写死 127.0.0.1 会让 localhost 页面上的跨源 fetch
+   *（页面 localhost:3080 → sidecar 127.0.0.1:318x）全部失败。
+   */
+  function allowedOrigin(req: IncomingMessage): string {
+    const origin = req.headers['origin']
+    return origin === undefined ? 'http://127.0.0.1' : String(origin)
+  }
+
+  function sendJson(req: IncomingMessage, res: ServerResponse, status: number, payload: unknown): void {
     res.writeHead(status, {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
-      'access-control-allow-origin': 'http://127.0.0.1',
+      'access-control-allow-origin': allowedOrigin(req),
       vary: 'Origin',
     })
     res.end(JSON.stringify(payload))
@@ -472,12 +482,12 @@ export function apply(ctx: Context): void {
 
   const server: Server = createServer((req, res) => {
     if (!originAllowed(req) || !hostIsLoopback(req)) {
-      sendJson(res, 403, { ok: false, error: 'forbidden' })
+      sendJson(req, res, 403, { ok: false, error: 'forbidden' })
       return
     }
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
-        'access-control-allow-origin': 'http://127.0.0.1',
+        'access-control-allow-origin': allowedOrigin(req),
         'access-control-allow-methods': 'GET, POST',
         'access-control-allow-headers': 'content-type',
         'access-control-max-age': '86400',
@@ -488,19 +498,19 @@ export function apply(ctx: Context): void {
     }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     if (req.method === 'GET' && url.pathname === '/ping') {
-      sendJson(res, 200, { ok: true, plugin: name })
+      sendJson(req, res, 200, { ok: true, plugin: name })
       return
     }
     if (req.method === 'GET' && url.pathname === '/state') {
       void buildStatus('')
-        .then(async status => sendJson(res, 200, {
+        .then(async status => sendJson(req, res, 200, {
           ok: true,
           status,
           sources: (await readState()).sources ?? DEFAULT_SOURCES,
         }))
         .catch((error: unknown) => {
           ctx.logger.warn(error)
-          sendJson(res, 500, { ok: false, error: 'state build failed' })
+          sendJson(req, res, 500, { ok: false, error: 'state build failed' })
         })
       return
     }
@@ -510,7 +520,7 @@ export function apply(ctx: Context): void {
           const cmd = JSON.parse(raw.toString('utf8')) as StateCommand
           const result = await execute(cmd)
           const status = await buildStatus(result.message)
-          sendJson(res, 200, {
+          sendJson(req, res, 200, {
             ok: true,
             message: result.message,
             status,
@@ -519,11 +529,11 @@ export function apply(ctx: Context): void {
         })
         .catch((error: unknown) => {
           ctx.logger.warn(error)
-          sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'bad request' })
+          sendJson(req, res, 400, { ok: false, error: error instanceof Error ? error.message : 'bad request' })
         })
       return
     }
-    sendJson(res, 404, { ok: false, error: 'not found' })
+    sendJson(req, res, 404, { ok: false, error: 'not found' })
   })
 
   /** 依序试绑端口范围；全占满时退到 OS 随机端口并告警（发现协议会失效）。 */

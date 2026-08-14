@@ -148,6 +148,16 @@ const evilHostStatus = await new Promise((resolve, reject) => {
 })
 assert.equal(evilHostStatus, 403, '非本机 Host 被拒（DNS rebinding 防护）')
 
+// 10b. CORS 回显：localhost 页面跨源 fetch（页面 localhost:3080 → sidecar
+// 127.0.0.1）必须拿到自己的 Origin，写死 127.0.0.1 会让浏览器全部拒收
+response = await fetch(`${base}/state`, { headers: { origin: `http://localhost:3080` } })
+assert.equal(response.status, 200, 'localhost Origin 放行')
+assert.equal(
+  response.headers.get('access-control-allow-origin'),
+  'http://localhost:3080',
+  'ACAO 原样回显请求 Origin（而非写死 127.0.0.1）',
+)
+
 // 11. client bundle 形态：__ModuleLoader__ 包装 + 命名导出 apply/inject（与
 // 正式跑通的 dsh-file-upload bundle 同构，runner 按命名导出取插件体）
 const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
