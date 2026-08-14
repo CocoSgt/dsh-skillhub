@@ -1,7 +1,7 @@
 {
   "name": "dsh-skills",
   "description": "Global skill hub for dsh: aggregates Claude Code, project, and .skill-package skills into ~/.dsh/skills with reference/copy import and slash-menu usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "files": [
     "lib",
     "cordis.patch.yml",
@@ -57,5 +57,20 @@
   "dependencies": {
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.5",
     "@deepseek-ai/cordis": "^4.0.1"
-  }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek",
+    "deepseek-harness",
+    "deepseek-ai",
+    "cordis",
+    "plugin",
+    "ai-agent",
+    "coding-agent",
+    "skills",
+    "skill-hub",
+    "slash-commands",
+    "claude-skills"
+  ]
 }
