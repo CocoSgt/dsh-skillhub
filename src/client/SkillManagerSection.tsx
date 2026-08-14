@@ -3,8 +3,14 @@
  *
  * 全部数据操作经宿主 half 的环回 sidecar 完成（见 src/client/index.ts 头注）。
  * 组件由 settings.section 槽渲染；inject 面提供 openPath（打开技能目录）。
+ *
+ * 样式完全复用官方设置页体系：Button 原子组件
+ * （@deepseek-ai/dsh-client-ui-primitives）+ 全局 --dsw-alias-* 设计令牌 +
+ * 官方尺寸词汇（section 760 / 卡片 r12 / 输入 h32 r8 / 密集动作胶囊
+ * h28 r14），结构与类名形态对齐 Models / Plugins 设置页，不引入自配色。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 
 export interface SkillManagerSectionProps {
   /** 槽位 inject 面（apply 注册时提供，经 InjectFace 摊平为 prop）。 */
@@ -108,43 +114,83 @@ function invocationLabel(invocation: string): string {
   return '用户 + 模型可调用'
 }
 
-/** 面板内容样式（作用域限于本组件的类名前缀 dsh-skm-）。 */
+/** 状态行语气：失败类文案挂 error 红，成功/中性走 tertiary。 */
+function statusTone(message: string): 'idle' | 'error' {
+  return /^(出错|加载失败|读取失败|保存失败|删除失败|导入失败|导出失败)/u.test(message) ? 'error' : 'idle'
+}
+
+/**
+ * 官方设置页样式词汇（来源：ui-settings-plugins / ui-settings-models 的
+ * module.css，令牌全部走 --dsw-alias-*，深浅色由宿主主题切换自动适配）。
+ */
 const CSS = `
-.dsh-skm-message { min-height: 18px; font-size: 12px; color: var(--dsw-alias-text-3, #999); margin-bottom: 8px; }
-.dsh-skm-tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
-.dsh-skm-tab {
-  padding: 4px 10px; border-radius: 8px; border: 1px solid transparent; cursor: pointer;
-  font-size: 12px; background: none; color: var(--dsw-alias-text-2, #bbb);
-}
-.dsh-skm-tab.active { border-color: var(--dsw-alias-text-accent, #4c9aff); color: var(--dsw-alias-text-1, #eee); }
-.dsh-skm-row {
-  display: flex; align-items: flex-start; gap: 8px; padding: 8px 0;
-  border-top: 1px solid rgba(128,128,140,.18);
-}
-.dsh-skm-row:first-child { border-top: none; }
-.dsh-skm-main { flex: 1; min-width: 0; }
-.dsh-skm-name { font-weight: 600; font-size: 13px; }
-.dsh-skm-name code { font-family: ui-monospace, monospace; font-size: 12px; color: var(--dsw-alias-text-accent, #4c9aff); }
-.dsh-skm-desc { font-size: 12px; color: var(--dsw-alias-text-2, #bbb); word-break: break-word; }
-.dsh-skm-meta { font-size: 11px; color: var(--dsw-alias-text-3, #888); margin-top: 2px; }
-.dsh-skm-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
-.dsh-skm-btn {
-  padding: 3px 8px; border-radius: 6px; cursor: pointer; font-size: 11px;
-  border: 1px solid rgba(128,128,140,.35); background: none; color: var(--dsw-alias-text-2, #bbb);
-}
-.dsh-skm-btn:hover { color: var(--dsw-alias-text-1, #eee); border-color: var(--dsw-alias-text-accent, #4c9aff); }
-.dsh-skm-btn.danger:hover { color: #ff7a7a; border-color: #ff7a7a; }
-.dsh-skm-empty { padding: 18px 0; text-align: center; color: var(--dsw-alias-text-3, #888); font-size: 12px; }
-.dsh-skm-editor { width: 100%; box-sizing: border-box; min-height: 200px; margin: 6px 0;
-  padding: 8px; border-radius: 8px; font: 12px/1.5 ui-monospace, monospace;
-  color: var(--dsw-alias-text-1, #eee); background: rgba(0,0,0,.25);
-  border: 1px solid rgba(128,128,140,.35); resize: vertical; }
-.dsh-skm-input {
-  box-sizing: border-box; width: 100%; padding: 6px 8px; border-radius: 8px; font: 12px system-ui, sans-serif;
-  color: var(--dsw-alias-text-1, #eee); background: rgba(0,0,0,.25);
-  border: 1px solid rgba(128,128,140,.35); }
-.dsh-skm-label { display: block; font-size: 12px; margin: 8px 0 4px; color: var(--dsw-alias-text-2, #bbb); }
-.dsh-skm-block { width: 100%; }
+.dsh-skm-section { display: flex; flex-direction: column; gap: 12px; max-width: 760px;
+  color: var(--dsw-alias-label-primary); }
+.dsh-skm-heading { margin: 0; font-size: 18px; font-weight: 600; }
+.dsh-skm-intro { margin: 0; font-size: 13px; color: var(--dsw-alias-label-tertiary); }
+.dsh-skm-status { margin: 0; min-height: 18px; font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-tertiary); }
+.dsh-skm-status[data-tone='error'] { color: var(--dsw-alias-state-error-primary); }
+.dsh-skm-tabs { display: flex; align-items: flex-end; gap: 22px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2); margin-top: 2px; }
+.dsh-skm-tab { position: relative; border: 0; padding: 7px 1px 9px; background: transparent;
+  color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 13px; line-height: 20px;
+  cursor: pointer; }
+.dsh-skm-tab:hover, .dsh-skm-tab[data-active='true'] { color: var(--dsw-alias-label-primary); }
+.dsh-skm-tab[data-active='true']::after { position: absolute; right: 0; bottom: -1px; left: 0;
+  height: 2px; border-radius: 2px 2px 0 0; background: var(--dsw-alias-label-primary); content: ''; }
+.dsh-skm-tab:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px; border-radius: 2px; color: var(--dsw-alias-label-primary); }
+.dsh-skm-panel { min-width: 0; padding-top: 2px; }
+.dsh-skm-cards { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-direction: column; gap: 10px; }
+.dsh-skm-rowCard { border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px;
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.dsh-skm-rowHead { display: flex; align-items: center; gap: 10px; }
+.dsh-skm-rowIdentity { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.dsh-skm-rowName { font-size: 14px; line-height: 22px; font-weight: 500;
+  color: var(--dsw-alias-label-primary); }
+.dsh-skm-rowName code { font-family: var(--ds-font-family-code, ui-monospace, monospace);
+  font-size: 13px; }
+.dsh-skm-rowTag { flex: none; padding: 1px 6px; border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 4px; font-size: 11px; line-height: 16px;
+  color: var(--dsw-alias-label-secondary); }
+.dsh-skm-rowActions { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.dsh-skm-danger { color: var(--dsw-alias-state-error-primary); }
+.dsh-skm-danger:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-danger); }
+.dsh-skm-desc { margin: 0; font-size: 13px; line-height: 20px; word-break: break-word;
+  color: var(--dsw-alias-label-secondary); }
+.dsh-skm-meta { margin: 0; font-size: 12px; line-height: 18px; word-break: break-all;
+  color: var(--dsw-alias-label-tertiary); }
+.dsh-skm-empty { margin: 0; font-size: 13px; color: var(--dsw-alias-label-tertiary); }
+.dsh-skm-editor { border-radius: 12px; background: var(--dsw-alias-bg-module-platform);
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+.dsh-skm-editorHeader { display: flex; align-items: baseline; gap: 8px; }
+.dsh-skm-editorTitle { font-size: 14px; line-height: 22px; font-weight: 500;
+  color: var(--dsw-alias-label-primary); }
+.dsh-skm-field { display: flex; flex-direction: column; gap: 6px; }
+.dsh-skm-fieldLabel { display: inline-flex; align-items: center; gap: 10px; font-size: 12px;
+  line-height: 18px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
+.dsh-skm-input, .dsh-skm-textarea { box-sizing: border-box; width: 100%;
+  padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px;
+  font: inherit; font-size: 14px; line-height: 22px; background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary); }
+.dsh-skm-input { height: 32px; padding: 0 10px; }
+.dsh-skm-textarea { min-height: 200px; resize: vertical;
+  font-family: var(--ds-font-family-code, ui-monospace, monospace); font-size: 12px;
+  line-height: 1.6; }
+.dsh-skm-input:focus, .dsh-skm-textarea:focus { outline: none;
+  border-color: var(--dsw-alias-brand-primary); }
+.dsh-skm-input::placeholder, .dsh-skm-textarea::placeholder {
+  color: var(--dsw-alias-label-dimmed); }
+.dsh-skm-file { font-size: 13px; color: var(--dsw-alias-label-secondary); }
+.dsh-skm-file::file-selector-button { box-sizing: border-box; display: inline-flex;
+  align-items: center; justify-content: center; height: 28px; padding: 0 10px;
+  margin-right: 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px;
+  background: transparent; color: var(--dsw-alias-label-primary); font: inherit;
+  font-size: 12px; line-height: 18px; cursor: pointer; }
+.dsh-skm-file::file-selector-button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-skm-editorActions { display: flex; justify-content: flex-end; gap: 8px; }
 `
 
 type TabId = 'installed' | 'importable' | 'paste' | 'sources'
@@ -218,23 +264,33 @@ export function SkillManagerSection({ openPath }: SkillManagerSectionProps) {
 
   return (
     <div className="dsh-skm-section">
-      <div className="dsh-skm-message">{message}</div>
-      <div className="dsh-skm-tabs">
+      <h2 className="dsh-skm-heading">技能</h2>
+      <p className="dsh-skm-intro">管理本地技能：已安装的技能出现在输入框的「/」斜杠菜单中。</p>
+      <p className="dsh-skm-status" role="status" aria-live="polite" data-tone={statusTone(message)}>
+        {message}
+      </p>
+      <div className="dsh-skm-tabs" role="tablist" aria-label="技能管理页签">
         {tabs.map(entry => (
           <button
             key={entry.id}
             type="button"
-            className={`dsh-skm-tab ${tab === entry.id ? 'active' : ''}`}
+            role="tab"
+            className="dsh-skm-tab"
+            aria-selected={tab === entry.id}
+            data-active={tab === entry.id ? 'true' : undefined}
+            tabIndex={tab === entry.id ? 0 : -1}
             onClick={() => { setTab(entry.id); setEditing(undefined) }}
           >{entry.label}</button>
         ))}
       </div>
-      {tab === 'installed' && (
-        <InstalledTab status={status} editing={editing} setEditing={setEditing} run={run} startEdit={startEdit} openPath={openPath} />
-      )}
-      {tab === 'importable' && <ImportableTab status={status} run={run} />}
-      {tab === 'paste' && <PasteTab run={run} />}
-      {tab === 'sources' && <SourcesTab run={run} refresh={refresh} />}
+      <div className="dsh-skm-panel" role="tabpanel">
+        {tab === 'installed' && (
+          <InstalledTab status={status} editing={editing} setEditing={setEditing} run={run} startEdit={startEdit} openPath={openPath} />
+        )}
+        {tab === 'importable' && <ImportableTab status={status} run={run} />}
+        {tab === 'paste' && <PasteTab run={run} />}
+        {tab === 'sources' && <SourcesTab run={run} refresh={refresh} />}
+      </div>
     </div>
   )
 }
@@ -267,85 +323,90 @@ function InstalledTab({ status, editing, setEditing, run, startEdit, openPath }:
   const [draft, setDraft] = useState('')
   useEffect(() => { setDraft(editing?.content ?? '') }, [editing])
   if (list.length === 0) {
-    return <div className="dsh-skm-empty">还没有已安装的技能。去「可导入」或「粘贴导入」添加一个吧。</div>
+    return <p className="dsh-skm-empty">还没有已安装的技能。去「可导入」或「粘贴导入」添加一个吧。</p>
   }
-  return <div>
+  return <ul className="dsh-skm-cards">
     {list.map(skill => {
       if (editing !== undefined && editing.name === skill.name) {
-        return <div key={skill.name} className="dsh-skm-row">
-          <div className="dsh-skm-main">
-            <div className="dsh-skm-name">编辑：{skill.name}</div>
-            <textarea className="dsh-skm-editor" value={draft} onChange={event => setDraft(event.target.value)} />
-            <div className="dsh-skm-actions">
-              <button type="button" className="dsh-skm-btn" onClick={() => {
-                const content = draft
-                setEditing(undefined)
-                void run({ action: 'save', name: skill.name, content }).catch(() => undefined)
-              }}>保存</button>
-              <button type="button" className="dsh-skm-btn" onClick={() => setEditing(undefined)}>取消</button>
-            </div>
+        return <li key={skill.name} className="dsh-skm-editor">
+          <div className="dsh-skm-editorHeader">
+            <span className="dsh-skm-editorTitle">编辑：{skill.name}</span>
           </div>
-        </div>
+          <textarea className="dsh-skm-textarea" aria-label={`编辑 ${skill.name} 的内容`}
+            value={draft} onChange={event => setDraft(event.target.value)} />
+          <div className="dsh-skm-editorActions">
+            <Button size="sm" variant="primary" onClick={() => {
+              const content = draft
+              setEditing(undefined)
+              void run({ action: 'save', name: skill.name, content }).catch(() => undefined)
+            }}>保存</Button>
+            <Button size="sm" variant="outline" onClick={() => setEditing(undefined)}>取消</Button>
+          </div>
+        </li>
       }
       const metaBits = [
-        invocationLabel(skill.invocation),
         skill.addedAt !== '' ? `添加于 ${fmtDate(skill.addedAt)}` : '',
         skill.source !== '' ? `来源：${skill.source}` : '',
       ].filter(s => s !== '')
-      return <div key={skill.name} className="dsh-skm-row">
-        <div className="dsh-skm-main">
-          <div className="dsh-skm-name"><code>/{skill.name}</code></div>
-          <div className="dsh-skm-desc">{skill.description}</div>
-          {metaBits.length > 0 && <div className="dsh-skm-meta">{metaBits.join(' · ')}</div>}
+      return <li key={skill.name} className="dsh-skm-rowCard">
+        <div className="dsh-skm-rowHead">
+          <span className="dsh-skm-rowIdentity">
+            <span className="dsh-skm-rowName"><code>/{skill.name}</code></span>
+            <span className="dsh-skm-rowTag">{invocationLabel(skill.invocation)}</span>
+          </span>
+          <span className="dsh-skm-rowActions">
+            <Button size="sm" variant="outline" onClick={() => void startEdit(skill)}>编辑</Button>
+            <Button size="sm" variant="outline" onClick={() => {
+              void run({ action: 'export', name: skill.name })
+                .then(response => {
+                  if (response.archiveBase64 !== undefined) downloadArchive(skill.name, response.archiveBase64)
+                })
+                .catch(() => undefined)
+            }}>导出 .skill</Button>
+            <Button size="sm" variant="outline" onClick={() => {
+              void navigator.clipboard?.writeText(`/${skill.name}`).catch(() => undefined)
+            }}>复制 /{skill.name}</Button>
+            {openPath !== undefined && <Button size="sm" variant="outline" onClick={() => {
+              const dir = skill.file.split('/').slice(0, -1).join('/')
+              openPath(dir)
+            }}>打开目录</Button>}
+            <Button size="sm" variant="ghost" className="dsh-skm-danger" onClick={() => {
+              if (window.confirm(`确定删除技能「${skill.name}」吗？（会移到 skill-trash 回收站）`)) {
+                void run({ action: 'delete', name: skill.name }).catch(() => undefined)
+              }
+            }}>删除</Button>
+          </span>
         </div>
-        <div className="dsh-skm-actions">
-          <button type="button" className="dsh-skm-btn" onClick={() => void startEdit(skill)}>编辑</button>
-          <button type="button" className="dsh-skm-btn" onClick={() => {
-            void run({ action: 'export', name: skill.name })
-              .then(response => {
-                if (response.archiveBase64 !== undefined) downloadArchive(skill.name, response.archiveBase64)
-              })
-              .catch(() => undefined)
-          }}>导出 .skill</button>
-          <button type="button" className="dsh-skm-btn" onClick={() => {
-            void navigator.clipboard?.writeText(`/${skill.name}`).catch(() => undefined)
-          }}>复制 /{skill.name}</button>
-          <button type="button" className="dsh-skm-btn" onClick={() => {
-            const dir = skill.file.split('/').slice(0, -1).join('/')
-            openPath?.(dir)
-          }}>打开目录</button>
-          <button type="button" className="dsh-skm-btn danger" onClick={() => {
-            if (window.confirm(`确定删除技能「${skill.name}」吗？（会移到 skill-trash 回收站）`)) {
-              void run({ action: 'delete', name: skill.name }).catch(() => undefined)
-            }
-          }}>删除</button>
-        </div>
-      </div>
+        <p className="dsh-skm-desc">{skill.description}</p>
+        {metaBits.length > 0 && <p className="dsh-skm-meta">{metaBits.join(' · ')}</p>}
+      </li>
     })}
-  </div>
+  </ul>
 }
 
 function ImportableTab({ status, run }: TabCommon & { status: StatusValue | undefined }) {
   const list = status?.importable ?? []
   if (list.length === 0) {
-    return <div className="dsh-skm-empty">来源目录中没有可导入的新技能。可在「来源」页检查目录配置。</div>
+    return <p className="dsh-skm-empty">来源目录中没有可导入的新技能。可在「来源」页检查目录配置。</p>
   }
-  return <div>
+  return <ul className="dsh-skm-cards">
     {list.map(skill => (
-      <div key={skill.sourcePath} className="dsh-skm-row">
-        <div className="dsh-skm-main">
-          <div className="dsh-skm-name"><code>/{skill.name}</code></div>
-          <div className="dsh-skm-desc">{skill.description}</div>
-          <div className="dsh-skm-meta">{skill.sourcePath}</div>
+      <li key={skill.sourcePath} className="dsh-skm-rowCard">
+        <div className="dsh-skm-rowHead">
+          <span className="dsh-skm-rowIdentity">
+            <span className="dsh-skm-rowName"><code>/{skill.name}</code></span>
+          </span>
+          <span className="dsh-skm-rowActions">
+            <Button size="sm" variant="outline" onClick={() => {
+              void run({ action: 'import', sourcePath: skill.sourcePath }).catch(() => undefined)
+            }}>导入</Button>
+          </span>
         </div>
-        <div className="dsh-skm-actions">
-          <button type="button" className="dsh-skm-btn" onClick={() => {
-            void run({ action: 'import', sourcePath: skill.sourcePath }).catch(() => undefined)
-          }}>导入</button>
-        </div>
-      </div>
+        <p className="dsh-skm-desc">{skill.description}</p>
+        <p className="dsh-skm-meta">{skill.sourcePath}</p>
+      </li>
     ))}
-  </div>
+  </ul>
 }
 
 function PasteTab({ run }: TabCommon) {
@@ -367,34 +428,46 @@ function PasteTab({ run }: TabCommon) {
     reader.readAsDataURL(file)
   }
 
-  return <div>
-    <label className="dsh-skm-label" htmlFor="dsh-skm-paste-archive">上传 .skill 包（Claude 网页版导出格式，含资源文件整包导入）</label>
-    <input id="dsh-skm-paste-archive" className="dsh-skm-input" type="file" accept=".skill,.zip"
-      onChange={event => onPickArchive(event.target.files?.[0])} />
-    {uploadBase64 !== '' && <div className="dsh-skm-actions">
-      <button type="button" className="dsh-skm-btn" onClick={() => {
-        void run({ action: 'importArchive', name: uploadName, archiveBase64: uploadBase64 })
-          .then(() => { setUploadBase64(''); setUploadName('') })
-          .catch(() => undefined)
-      }}>导入 {uploadName}</button>
-      <button type="button" className="dsh-skm-btn" onClick={() => { setUploadBase64(''); setUploadName('') }}>取消</button>
-    </div>}
-    <label className="dsh-skm-label" htmlFor="dsh-skm-paste-name">技能名称</label>
-    <input id="dsh-skm-paste-name" className="dsh-skm-input" placeholder="my-skill（可留空，从内容推断）"
-      value={name} onChange={event => setName(event.target.value)} />
-    <label className="dsh-skm-label" htmlFor="dsh-skm-paste-desc">描述</label>
-    <input id="dsh-skm-paste-desc" className="dsh-skm-input" placeholder="一句话描述（可留空，取正文首行）"
-      value={description} onChange={event => setDescription(event.target.value)} />
-    <label className="dsh-skm-label" htmlFor="dsh-skm-paste-body">内容</label>
-    <textarea id="dsh-skm-paste-body" className="dsh-skm-editor dsh-skm-block"
-      placeholder="技能正文（Markdown）。也可以直接粘贴带 --- frontmatter 的完整 SKILL.md。"
-      value={content} onChange={event => setContent(event.target.value)} />
-    <div className="dsh-skm-actions">
-      <button type="button" className="dsh-skm-btn" onClick={() => {
-        void run({ action: 'importPaste', name, description, content }).catch(() => undefined)
-      }}>导入</button>
+  return <>
+    <div className="dsh-skm-editor">
+      <div className="dsh-skm-field">
+        <span className="dsh-skm-fieldLabel">上传 .skill 包（Claude 网页版导出格式，含资源文件整包导入）</span>
+        <input className="dsh-skm-file" type="file" accept=".skill,.zip" aria-label="选择 .skill 包"
+          onChange={event => onPickArchive(event.target.files?.[0])} />
+      </div>
+      {uploadBase64 !== '' && <div className="dsh-skm-editorActions">
+        <Button size="sm" variant="primary" onClick={() => {
+          void run({ action: 'importArchive', name: uploadName, archiveBase64: uploadBase64 })
+            .then(() => { setUploadBase64(''); setUploadName('') })
+            .catch(() => undefined)
+        }}>导入 {uploadName}</Button>
+        <Button size="sm" variant="outline" onClick={() => { setUploadBase64(''); setUploadName('') }}>取消</Button>
+      </div>}
     </div>
-  </div>
+    <div className="dsh-skm-editor">
+      <div className="dsh-skm-field">
+        <label className="dsh-skm-fieldLabel" htmlFor="dsh-skm-paste-name">技能名称</label>
+        <input id="dsh-skm-paste-name" className="dsh-skm-input" placeholder="my-skill（可留空，从内容推断）"
+          value={name} onChange={event => setName(event.target.value)} />
+      </div>
+      <div className="dsh-skm-field">
+        <label className="dsh-skm-fieldLabel" htmlFor="dsh-skm-paste-desc">描述</label>
+        <input id="dsh-skm-paste-desc" className="dsh-skm-input" placeholder="一句话描述（可留空，取正文首行）"
+          value={description} onChange={event => setDescription(event.target.value)} />
+      </div>
+      <div className="dsh-skm-field">
+        <label className="dsh-skm-fieldLabel" htmlFor="dsh-skm-paste-body">内容</label>
+        <textarea id="dsh-skm-paste-body" className="dsh-skm-textarea"
+          placeholder="技能正文（Markdown）。也可以直接粘贴带 --- frontmatter 的完整 SKILL.md。"
+          value={content} onChange={event => setContent(event.target.value)} />
+      </div>
+      <div className="dsh-skm-editorActions">
+        <Button variant="primary" onClick={() => {
+          void run({ action: 'importPaste', name, description, content }).catch(() => undefined)
+        }}>导入</Button>
+      </div>
+    </div>
+  </>
 }
 
 function SourcesTab({ run, refresh }: TabCommon & { refresh: () => Promise<void> }) {
@@ -406,18 +479,20 @@ function SourcesTab({ run, refresh }: TabCommon & { refresh: () => Promise<void>
       .then(state => { setSourcesText(state.sources.join('\n')); setLoaded(true) })
       .catch(() => { setSourcesText(''); setLoaded(true) })
   }, [loaded])
-  if (sourcesText === undefined) return <div className="dsh-skm-empty">读取来源配置中…</div>
-  return <div>
-    <label className="dsh-skm-label" htmlFor="dsh-skm-sources">来源目录（每行一个，支持 ~）</label>
-    <textarea id="dsh-skm-sources" className="dsh-skm-editor dsh-skm-block" style={{ minHeight: '120px' }}
-      value={sourcesText} onChange={event => setSourcesText(event.target.value)} />
-    <div className="dsh-skm-actions">
-      <button type="button" className="dsh-skm-btn" onClick={() => {
+  if (sourcesText === undefined) return <p className="dsh-skm-empty">读取来源配置中…</p>
+  return <div className="dsh-skm-editor">
+    <div className="dsh-skm-field">
+      <label className="dsh-skm-fieldLabel" htmlFor="dsh-skm-sources">来源目录（每行一个，支持 ~）</label>
+      <textarea id="dsh-skm-sources" className="dsh-skm-textarea" style={{ minHeight: '120px' }}
+        value={sourcesText} onChange={event => setSourcesText(event.target.value)} />
+    </div>
+    <div className="dsh-skm-editorActions">
+      <Button size="sm" variant="primary" onClick={() => {
         const sources = sourcesText.split('\n').map(s => s.trim()).filter(s => s !== '')
         void run({ action: 'setSources', sources })
           .then(() => refresh())
           .catch(() => undefined)
-      }}>保存并刷新</button>
+      }}>保存并刷新</Button>
     </div>
   </div>
 }
