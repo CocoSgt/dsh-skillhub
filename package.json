@@ -10,7 +10,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CocoSgt/dsh-skill-hub.git"
+    "url": "git+https://github.com/CocoSgt/dsh-skillhub.git"
   },
   "type": "module",
   "main": "lib/index.mjs",

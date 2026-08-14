@@ -3,7 +3,7 @@
 简体中文 | [English](README.md)
 
 npm 包名:`dsh-skillhub` · GitHub 仓库:
-[CocoSgt/dsh-skill-hub](https://github.com/CocoSgt/dsh-skill-hub)
+[CocoSgt/dsh-skillhub](https://github.com/CocoSgt/dsh-skillhub)
 
 DeepSeek Harness(dsh)的第三方技能中枢:**把散落各处的技能汇成全局库**。
 Claude Code 的 `~/.claude/skills`、项目目录、`.skill` 包……统一入库到
@@ -82,11 +82,10 @@ dsh plugin --profile web add dsh-skillhub
 dsh plugin --profile web add dsh-skillhub dsh-attachments dsh-context-inspector
 ```
 
-GitHub 回退方式(仓库是 `CocoSgt/dsh-skill-hub`;npm 包名是
-`dsh-skillhub`):
+GitHub 回退方式:
 
 ```sh
-dsh plugin --profile web add github:CocoSgt/dsh-skill-hub
+dsh plugin --profile web add github:CocoSgt/dsh-skillhub
 ```
 
 安装后重启 `dsh web`。卸载:`dsh plugin --profile web remove dsh-skillhub`。
