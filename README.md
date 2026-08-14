@@ -1,6 +1,6 @@
 # dsh-skill-manager
 
-DeepSeek Harness（dsh）第三方插件：**技能管理器**。在 dsh web 界面左下角提供「🧩 技能」入口，点开面板即可查看、导入、编辑、删除技能——导入的技能自动出现在输入框的 `/` 斜杠菜单中。
+DeepSeek Harness（dsh）第三方插件：**技能管理器**。在 dsh web 的**设置界面**里增加「🧩 技能」导航页（与 Models / General / Plugins 同级），查看、导入、编辑、删除技能——导入的技能自动出现在输入框的 `/` 斜杠菜单中。
 
 对标 Claude 网页版的技能管理器，入口更低层（直接管理本地 `SKILL.md` 文件）。
 
@@ -26,10 +26,13 @@ DeepSeek Harness（dsh）第三方插件：**技能管理器**。在 dsh web 界
 双 half 单包结构（与官方外部插件模板一致）：
 
 ```
-src/index.ts          宿主端 half（Node）：技能扫描/清洗/导入/编辑/删除 + 环回 sidecar HTTP
-src/client/index.ts   浏览器 half（自渲染 DOM）：左下角入口 + 管理面板
-cordis.patch.yml      bundle 层声明（向组合 insert 本插件）
+src/index.ts                    宿主端 half（Node）：技能扫描/清洗/导入/编辑/删除 + 环回 sidecar HTTP
+src/client/index.ts             浏览器 half：把设置页注册进官方 settings.section 槽
+src/client/SkillManagerSection.tsx   设置页 React 组件（四个页签）
+cordis.patch.yml                bundle 层声明（向组合 insert 本插件）
 ```
+
+浏览器 half 通过官方 `ui-slots` 系统注册：`ctx.slots.inject('settings.section', …)`，与官方 Models / Plugins 设置页同一机制，入口自然融入设置界面，不再有独立的浮动图标。
 
 ### 数据通道：环回 sidecar
 
@@ -67,5 +70,5 @@ node test/smoke.mjs # 端到端冒烟：发现 → 全部命令 → 安全围栏
 - **中文名称会被清洗掉**：kebab-case 规范化只保留 `[a-z0-9]`，纯中文名导入后会回退为 `skill`（建议导入前起一个拉丁名称）。
 - 端口 3180–3189 全被占用时退到 OS 随机端口并告警，浏览器面板将无法自动发现（同一台机器跑 10 个以上 dsh 实例才会触发）。
 - 编辑保存会重新走清洗管线：手工排版的 frontmatter 键顺序可能重排（`name`/`description` 固定在前，其余按键原样保留原顺序），正文首尾空白会被裁剪。
-- 面板 UI 为自渲染 DOM（外部插件通行做法），跟随 dsh 的 CSS 变量但非 React 组件，与官方设置页观感可能略有差异。
+- 面板样式自带作用域类名（`dsh-skm-*`），跟随 dsh 的 CSS 变量，但未用官方 UI 组件库，与官方设置页观感可能略有差异。
 - 未提供按目录批量导入；导入以技能为单位。

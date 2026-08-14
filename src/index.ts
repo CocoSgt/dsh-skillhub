@@ -538,7 +538,13 @@ export function apply(ctx: Context): void {
     }
     server.once('error', () => listen(index + 1))
     server.listen(PORT_RANGE[index]!, '127.0.0.1', () => {
-      ctx.logger.info(`dsh-skill-manager: sidecar 已就绪 http://127.0.0.1:${String(PORT_RANGE[index])}`)
+      // 失败的那次 listen 的回调不会被消费：端口占用重试后，旧回调会在
+      // 最终成功时补跑。以实际绑定地址为准，只记真实端口的一条日志。
+      const address = server.address()
+      const bound = typeof address === 'object' && address !== null ? address.port : undefined
+      if (bound === PORT_RANGE[index]) {
+        ctx.logger.info(`dsh-skill-manager: sidecar 已就绪 http://127.0.0.1:${String(bound)}`)
+      }
     })
   }
 

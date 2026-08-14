@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-manager",
-  "description": "dsh 技能管理器——查看/导入/编辑/删除技能（SKILL.md / .md），左下角入口 + 自渲染管理面板",
+  "description": "dsh 技能管理器——设置里的「🧩 技能」页：查看/导入/编辑/删除技能（SKILL.md / .md），支持从 ~/.claude/skills 等来源目录导入与粘贴导入",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -28,11 +28,16 @@
     "cordis": "^4.0.0-rc.7"
   },
   "scripts": {
-    "build": "tsdown --config ./tsdown.config.ts"
+    "build": "tsdown --config ./tsdown.config.ts",
+    "check": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
     "@types/node": "^24.0.0",
+    "@types/react": "^18.3.0",
+    "react": "^18.3.0",
     "tsdown": "0.22.2",
     "typescript": "^5.9.2"
   },

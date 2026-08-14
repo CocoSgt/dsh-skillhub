@@ -11,7 +11,6 @@ import * as plugin from '../lib/index.mjs'
 
 const SMOKE_HOME = '/tmp/dsh-skm-smoke-home'
 const SMOKE_SRC = '/tmp/dsh-skm-smoke-src'
-const PORT_RANGE = Array.from({ length: 10 }, (_, i) => 3180 + i)
 
 process.env['DSH_HOME'] = SMOKE_HOME
 await rm(SMOKE_HOME, { recursive: true, force: true })
@@ -32,10 +31,16 @@ await writeFile(path.join(SMOKE_SRC, 'lark', 'SKILL.md'), [
   '',
 ].join('\n'), 'utf8')
 
-// 最小宿主上下文：apply 只需要 logger 与 effect。
+// 最小宿主上下文：apply 只需要 logger 与 effect。info 日志里抓 sidecar
+// 实际绑定的端口——不能按端口范围探测发现：本机可能同时跑着正式 dsh
+// web（其 sidecar 占 3180），扫端口会找错服务、把测试命令打进真实环境。
 let disposeServer = () => {}
+const logs = []
 const ctx = {
-  logger: { info() {}, warn() {} },
+  logger: {
+    info(...args) { logs.push(args.map(String).join(' ')) },
+    warn(...args) { logs.push(args.map(String).join(' ')) },
+  },
   effect(fn) {
     disposeServer = fn()
     return () => disposeServer()
@@ -45,22 +50,15 @@ plugin.apply(ctx)
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-// 1. 发现：与浏览器 half 相同的端口探测
-let base
-for (let i = 0; i < 30 && base === undefined; i++) {
+// 1. 发现：从 apply 的就绪日志取本进程 sidecar 的端口
+let port
+for (let i = 0; i < 30 && port === undefined; i++) {
   await sleep(100)
-  for (const port of PORT_RANGE) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${String(port)}/ping`)
-      if (response.ok && (await response.json()).plugin === 'dsh-skill-manager') {
-        base = `http://127.0.0.1:${String(port)}`
-        break
-      }
-    } catch { /* 继续探测 */ }
-  }
+  const ready = logs.join('\n').match(/sidecar 已就绪 http:\/\/127\.0\.0\.1:(\d+)/)
+  if (ready !== null) port = ready[1]
 }
-assert.notEqual(base, undefined, 'sidecar 在 3 秒内可发现')
-const port = base.split(':').at(-1)
+assert.notEqual(port, undefined, 'sidecar 在 3 秒内就绪')
+const base = `http://127.0.0.1:${String(port)}`
 
 const get = async pathname => (await fetch(`${base}${pathname}`)).json()
 const command = async payload => {
@@ -150,11 +148,13 @@ const evilHostStatus = await new Promise((resolve, reject) => {
 })
 assert.equal(evilHostStatus, 403, '非本机 Host 被拒（DNS rebinding 防护）')
 
-// 11. client bundle 形态：__ModuleLoader__ 包装 + default 赋给 module.exports
+// 11. client bundle 形态：__ModuleLoader__ 包装 + 命名导出 apply/inject（与
+// 正式跑通的 dsh-file-upload bundle 同构，runner 按命名导出取插件体）
 const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
 assert.match(clientSource, /^window\.__ModuleLoader__\.load\(/)
 assert.ok(clientSource.includes('return module.exports;'), 'factory 以 return module.exports 收尾')
-assert.match(clientSource, /module\.exports = \{/, 'default 导出赋给 module.exports')
+assert.match(clientSource, /exports\.apply = apply;/, 'apply 以命名导出挂到 exports')
+assert.match(clientSource, /exports\.inject = inject;/, 'inject 以命名导出挂到 exports')
 
 disposeServer()
 console.log('smoke OK: 11 组断言全部通过')
