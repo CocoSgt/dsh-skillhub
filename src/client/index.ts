@@ -21,6 +21,18 @@ import { SkillManagerSection } from './SkillManagerSection.tsx'
 
 export { SkillManagerSection } from './SkillManagerSection.tsx'
 
+/** ctx.locale 的最小面：注册词典 + 绑定翻译函数(官方设置页同一机制)。 */
+interface LocaleFace {
+  register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): unknown
+  bind(ns: string): (key: string) => string
+}
+
+/** 词典命名空间。 */
+const NS = 'dsh-skill-manager'
+
+const en = { nav: 'Skills' }
+const zh = { nav: '技能' }
+
 interface ApiClient {
   host: {
     openPath(payload: { path: string }): Promise<unknown>
@@ -46,11 +58,22 @@ export function apply(ctx: ClientContext): void {
     } catch { /* connection 未就绪时静默忽略 */ }
   }
 
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'skills',
-    order: 25,
-    label: '🧩 技能',
-    inject: () => ({ openPath }),
-  }, SkillManagerSection))
+  // 导航标签走官方 locale 服务:英文界面显示 Skills,中文显示 技能。
+  // 动态 inject:locale 由 ui-settings-general 等官方包提供,web shell 必有;
+  // 组合里万一缺席也只是本页不注册,不阻塞 boot。
+  ctx.inject(['locale'], (localeCtx: ClientContext) => {
+    const locale = (localeCtx as unknown as { locale: LocaleFace }).locale
+    ctx.effect(() => {
+      const dispose = locale.register(NS, { zh, en })
+      return () => { if (typeof dispose === 'function') dispose() }
+    }, 'dsh-skill-manager: 词典注册')
+    const t = locale.bind(NS)
+    ctx.slots.inject('settings.section', () => ctx.slots.register({
+      name: 'settings.section',
+      id: 'skills',
+      order: 25,
+      label: () => t('nav'),
+      inject: () => ({ openPath }),
+    }, SkillManagerSection))
+  })
 }

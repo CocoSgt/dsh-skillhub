@@ -1,18 +1,18 @@
 # dsh-skill-manager
 
-DeepSeek Harness（dsh）第三方插件：**技能管理器**。在 dsh web 的**设置界面**里增加「🧩 技能」导航页（与 Models / General / Plugins 同级），查看、导入、编辑、删除技能——导入的技能自动出现在输入框的 `/` 斜杠菜单中。
+DeepSeek Harness（dsh）第三方插件：**技能管理器**。在 dsh web 的**设置界面**里增加「技能」导航页（与 Models / General / Plugins 同级，英文界面显示 Skills），查看、导入、编辑、删除技能——导入的技能自动出现在输入框的 `/` 斜杠菜单中。
 
 对标 Claude 网页版的技能管理器，入口更低层（直接管理本地 `SKILL.md` 文件）。
 
 ## 功能
 
-- **已安装**：列出 `<dshHome>/skills` 下的全部技能（目录式 `<name>/SKILL.md` 与平铺式 `<name>.md`），显示描述、调用方式（用户/模型）、添加时间、导入来源；支持编辑（读取全文 → 面板内编辑 → 保存）、删除（移入 `<dshHome>/skill-trash` 回收站，可找回）、导出 `.skill` 包、打开所在目录、复制 `/名称`。
-- **可导入**：扫描配置的来源目录（默认 `~/.claude/skills`，即可直接导入本机 Claude 技能），一键导入。支持三种形态：
+- **已安装**：列出 `<dshHome>/skills` 下的全部技能（目录式 `<name>/SKILL.md` 与平铺式 `<name>.md`），显示描述（Markdown 经官方 `MarkdownText` 渲染）、调用方式（用户/模型）、添加时间、导入来源；支持编辑（读取全文 → 面板内编辑 → 保存）、删除（移入 `<dshHome>/skill-trash` 回收站，可找回）、导出 `.skill` 包、打开所在目录、复制 `/名称`。
+- **导入**（三段式动线）：① 从来源目录导入——扫描「来源」页配置的目录（默认 `~/.claude/skills`，即可直接导入本机 Claude 技能），一键导入；② 上传 `.skill` 包；③ 粘贴文本创建。导入支持三种形态：
   - 目录式（`SKILL.md` + `references/` 等资源树）——**整树拷贝**，资源文件原样保留；
   - 平铺 `.md` 单文件——走清洗管线（见下）；
   - **`.skill` 打包**（Claude 网页版导出格式，zip：`<name>/SKILL.md` + 任意资源文件）——整包解压。
-- **粘贴 / 上传**：粘贴名称 + 描述 + 正文落为标准技能文件；或直接上传 `.skill` 文件（base64 上传，上限 64 MB）。
-- **来源**：管理来源目录列表（每行一个，支持 `~`）。
+- **粘贴 / 上传**（导入页第 ②③ 段）：上传 `.skill` 文件（base64 上传，上限 64 MB）；或粘贴名称 + 描述 + 正文直接落为标准技能文件。
+- **来源**：列表式管理导入扫描目录——每行一个目录（支持 `~`），添加/移除即时生效并落盘。
 - **斜杠调用**：导入即生效——`<dshHome>/skills` 是官方 skill-filesystem provider 的默认扫描根（resourceBase 指向技能目录，包内资源文件对模型可用），`/技能名` 出现在输入框斜杠菜单中，无需任何额外接线。
 
 ### .skill 包格式
@@ -44,11 +44,11 @@ packed-skill.skill (zip)
 ```
 src/index.ts                    宿主端 half（Node）：技能扫描/清洗/导入/编辑/删除 + 环回 sidecar HTTP
 src/client/index.ts             浏览器 half：把设置页注册进官方 settings.section 槽
-src/client/SkillManagerSection.tsx   设置页 React 组件（四个页签）
+src/client/SkillManagerSection.tsx   设置页 React 组件（三个页签：已安装 / 导入 / 来源）
 cordis.patch.yml                bundle 层声明（向组合 insert 本插件）
 ```
 
-浏览器 half 通过官方 `ui-slots` 系统注册：`ctx.slots.inject('settings.section', …)`，与官方 Models / Plugins 设置页同一机制，入口自然融入设置界面，不再有独立的浮动图标。
+浏览器 half 通过官方 `ui-slots` 系统注册：`ctx.slots.inject('settings.section', …)`，与官方 Models / Plugins 设置页同一机制，入口自然融入设置界面。导航标签走官方 `locale` 服务（中文「技能」/ 英文 Skills）；页面标题使用官方 `IconSkillOutline16` 图标（导航行的图标由宿主 `SettingsRoot` 按 id 硬编码，第三方 id 只能得到兜底齿轮）。
 
 ### 数据通道：环回 sidecar
 
