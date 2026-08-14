@@ -125,6 +125,14 @@ pnpm run build   # tsdown(宿主 ESM + 浏览器 bundle)
 注意:宿主方法参数名就是 RPC wire 字段名(Gateway SRC 模式),构建不得
 压缩改写参数名。
 
+## 标签
+
+本包与仓库带有 `dsh-plugin`、`dsh`、`deepseek-harness` 等关键词/topics。
+DeepSeek Harness 官方没有插件市场,也没有官方发现标签——第三方插件一旦
+发布,没有任何东西把它关联回生态,用户无从找起。这套社区标签是唯一现实
+的发现渠道(npm 搜 `keywords:dsh-plugin`;GitHub 搜 `topic:dsh-plugin`)。
+虽非官方,但非常重要,所以给它上了。
+
 ## 许可
 
 MIT

@@ -151,6 +151,16 @@ pnpm run build   # tsdown (host ESM + browser bundle)
 Note: host method parameter names ARE the RPC wire field names (Gateway SRC
 mode); the build must never minify or rewrite parameter names.
 
+## Tags
+
+This package and its repository carry the `dsh-plugin`, `dsh`, `deepseek-harness`
+and related keywords/topics. DeepSeek Harness ships no official plugin
+marketplace and no official discovery tag — once a third-party plugin is
+published, nothing links it back to the ecosystem and users have no way to
+find it. These community tags are the only practical discovery channel
+(npm: `keywords:dsh-plugin`; GitHub: `topic:dsh-plugin`). Unofficial, but
+essential — that is why they are here.
+
 ## License
 
 MIT
