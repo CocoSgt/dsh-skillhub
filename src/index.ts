@@ -1,91 +1,155 @@
 /**
- * dsh-skill-manager 宿主端 half。
+ * dsh-skill-hub 宿主端:skillHub 网关服务。
  *
- * 官方 RPC map 是构建期固定的（第三方插件不能注册新 RPC），settings 线上
- * 面也只暴露白名单命名空间，因此浏览器面板与本插件宿主 half 之间的数据
- * 通道是一个自建的环回 sidecar HTTP 服务：
- * - 绑定 127.0.0.1，端口取 3180–3189 中第一个空闲位（官方 web 默认 3080）。
- * - Origin/Host 围栏只放行本机来源（127.0.0.1 / localhost / [::1]），
- *   恶意网站的跨站请求与 DNS rebinding 均被拒绝。
- * - 端点：GET /ping（发现）、GET /state（状态+来源配置）、POST /command
- *   （rescan / import / importPaste / read / save / delete / setSources）。
+ * 核心机制:把散落各处的技能(Claude Code 的 ~/.claude/skills、项目目录、
+ * .skill 包……)汇成 `<dshHome>/skills/` 这个全局库——官方 skill-filesystem
+ * 的默认扫描根(rank 400,watcher 实时),入库即出现在 `/` 斜杠菜单。
  *
- * 导入的技能清洗为标准格式后写入 `<dshHome>/skills/<name>/SKILL.md`，
- * 该目录是官方 skill-filesystem provider 的默认扫描根（rank 400），
- * 因此导入完成后技能自动出现在 `/` 斜杠菜单中，无需其他接线。
+ * 两种入库身份:
+ *   - **引用(link,默认推荐)**:`skills/<name>` 是指向来源目录/文件的符号
+ *     链接。只有一份文件,没有同步问题;编辑引用技能=编辑来源本身。
+ *     harness 的扫描(nodeEntryKind 跟随符号链接)、fs 提供者与 watcher
+ *     (followSymlinks 默认开)都原生支持。来源消失时面板标注「引用失效」。
+ *   - **副本(copy)**:整树拷贝,与来源独立演化;state 记录来源路径备查
+ *     (漂移检测是二期,本期只记录不判定)。
+ *
+ * 传输:此前的环回 sidecar HTTP 服务已移除,改为 TypertRemoteService +
+ * 弱(src-json)清单注册(第三方双副本下 SRC 发现失明,原因与
+ * dsh-context-inspector 相同)。暴露 `skillHub/getState|runCommand` 两个
+ * RPC;runCommand 的负载是既有的命令联合,src-json 原样过 wire。
+ *
+ * 重要:Gateway 按参数名生成 wire 字段,公开方法保持简单标识符参数。
+ * 不使用 @Remote 装饰器:第三方双副本下宿主读不到本副本的装饰器标记
+ * (端点全靠上面的弱清单),且 tsdown 产物保留装饰器语法会让 Node 导入报错。
  */
 
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { cp, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readdir, readFile, readlink, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 
-export const name = 'dsh-skill-manager'
-
-/** 环回 sidecar 的端口扫描范围；浏览器 half 按同样的顺序探测。 */
-const PORT_RANGE = Array.from({ length: 10 }, (_, i) => 3180 + i)
-/** 单个命令请求体上限（.skill 上传走 base64，放宽到 64 MB）。 */
-const MAX_BODY_BYTES = 64 * 1024 * 1024
-/** 名称规范化后必须匹配的模式，同时是路径安全边界（无 `/`、无 `..`）。 */
+/** 名称规范化后必须匹配的模式,同时是路径安全边界(无 `/`、无 `..`)。 */
 const NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/
 const DEFAULT_SOURCES = ['~/.claude/skills']
 
-interface InstalledSkill {
+/** 技能的入库身份。 */
+export type SkillMode = 'link' | 'copy' | 'local'
+
+/** 全局库里的一个技能。 */
+export interface HubSkill {
   name: string
   description: string
   whenToUse: string
-  /** 'both' | 'user' | 'model'：来自 disable-model-invocation / user-invocable。 */
+  /** 'both' | 'user' | 'model':来自 disable-model-invocation / user-invocable。 */
   invocation: string
   addedAt: string
-  source: string
-  /** 技能文件的绝对路径。 */
+  /** 入库身份;旧版无记录的条目按 local 展示。 */
+  mode: SkillMode
+  /** link/copy 的来源路径('' 表示无来源:粘贴/编辑创建)。 */
+  sourcePath: string
+  /** link 的目标已消失(或不可读)。 */
+  broken: boolean
+  /** SKILL.md 之外的资源文件数(平铺 .md 恒 0)。 */
+  resourceCount: number
+  /** SKILL.md(或平铺 .md)的绝对路径。 */
   file: string
+  /** 技能目录的绝对路径(平铺 .md 为其所在目录)。 */
+  dir: string
 }
 
-interface ImportableSkill {
+/** 来源目录里一个可入库的技能。 */
+export interface DiscoverableSkill {
   name: string
   description: string
   sourcePath: string
+  /** .skill 打包技能只能复制,不能引用。 */
+  kind: 'dir' | 'md' | 'archive'
 }
 
-interface StateStatus {
+/** 一个来源目录的状态。 */
+export interface SourceInfo {
+  /** 配置原文(可含 ~)。 */
+  path: string
+  /** 目录当前是否存在可读。 */
+  exists: boolean
+  /** 目录里技能形态条目总数(含已入库的)。 */
+  skillCount: number
+}
+
+/** getState / runCommand 附带的完整状态。 */
+export interface HubState {
   message: string
-  installed: InstalledSkill[]
-  importable: ImportableSkill[]
+  skills: HubSkill[]
+  discoverable: DiscoverableSkill[]
+  sources: SourceInfo[]
 }
 
 interface StateFile {
   sources?: string[]
-  skills?: Record<string, { addedAt: string, source: string }>
+  skills?: Record<string, { addedAt: string, source: string, mode?: SkillMode }>
 }
 
-interface StateCommand {
-  action: 'rescan' | 'import' | 'importPaste' | 'importArchive' | 'read' | 'save' | 'delete' | 'export' | 'setSources'
+/** runCommand 的命令联合(src-json 原样过 wire)。 */
+export interface HubCommand {
+  action: 'rescan' | 'importLink' | 'importLinkBatch' | 'importCopy' | 'importPaste' | 'importArchive'
+    | 'read' | 'save' | 'delete' | 'export' | 'setSources'
+  /** importLinkBatch:一次引用多个来源。 */
+  sourcePaths?: string[]
   name?: string
   content?: string
   description?: string
   sourcePath?: string
   sources?: string[]
-  /** .skill 上传：zip 全文的 base64。 */
+  /** .skill 上传:zip 全文的 base64。 */
   archiveBase64?: string
 }
 
-/** Claude 网页版的 .skill 文件即 zip：`<name>/SKILL.md` + 任意资源文件。 */
+/** 目录浏览器的一个子目录条目。 */
+export interface BrowseEntry {
+  /** 目录名。 */
+  name: string
+  /** 其中技能形态条目数(限量探测;0 表示没有或未探测到)。 */
+  skillCount: number
+}
+
+/** browseDirs 的返回。 */
+export interface BrowseResult {
+  /** 当前目录绝对路径。 */
+  path: string
+  /** 展示路径(home 缩写为 ~)。 */
+  display: string
+  /** 上一级绝对路径(已到文件系统根时缺省)。 */
+  parent?: string
+  /** 子目录列表(技能多的在前)。 */
+  dirs: BrowseEntry[]
+  /** 常见技能位置建议(仅根调用返回;已配置的来源不重复给)。 */
+  suggestions?: { path: string, skillCount: number }[]
+}
+
+/** runCommand 的返回。 */
+export interface HubCommandResult {
+  message: string
+  state: HubState
+  body?: { name: string, content: string }
+  archiveBase64?: string
+}
+
+/** Claude 网页版的 .skill 文件即 zip:`<name>/SKILL.md` + 任意资源文件。 */
 interface ZipEntry {
   name: string
   data: Buffer
 }
 
-/** 极简 zip 读取：EOCD 定位中央目录，支持 stored(0)/deflate(8)。不做 ZIP64。 */
+/** 极简 zip 读取:EOCD 定位中央目录,支持 stored(0)/deflate(8)。不做 ZIP64。 */
 function readZip(buffer: Buffer): ZipEntry[] {
   let eocd = -1
   const scanFloor = Math.max(0, buffer.length - 22 - 65536)
   for (let i = buffer.length - 22; i >= scanFloor; i--) {
     if (buffer.readUInt32LE(i) === 0x06054b50) { eocd = i; break }
   }
-  if (eocd < 0) throw new Error('不是有效的 .skill 包（缺少 zip 结束目录）')
+  if (eocd < 0) throw new Error('不是有效的 .skill 包(缺少 zip 结束目录)')
   const count = buffer.readUInt16LE(eocd + 10)
   let offset = buffer.readUInt32LE(eocd + 16)
   const out: ZipEntry[] = []
@@ -106,14 +170,14 @@ function readZip(buffer: Buffer): ZipEntry[] {
       const compressed = buffer.subarray(dataStart, dataStart + compSize)
       if (method === 0) out.push({ name, data: Buffer.from(compressed) })
       else if (method === 8) out.push({ name, data: inflateRawSync(compressed) })
-      else throw new Error(`不支持的压缩方式 ${String(method)}（${name}）`)
+      else throw new Error(`不支持的压缩方式 ${String(method)}(${name})`)
     }
     offset += 46 + nameLen + extraLen + commentLen
   }
   return out
 }
 
-/** zip 写入需要的 CRC32（多项式 0xEDB88320，查表法）。 */
+/** zip 写入需要的 CRC32(多项式 0xEDB88320,查表法)。 */
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256)
   for (let n = 0; n < 256; n++) {
@@ -130,7 +194,7 @@ function crc32(data: Buffer): number {
   return (crc ^ 0xFFFFFFFF) >>> 0
 }
 
-/** 极简 zip 写入：全 deflate，无目录条目。足够生成 .skill 导出包。 */
+/** 极简 zip 写入:全 deflate,无目录条目。足够生成 .skill 导出包。 */
 function writeZip(entries: ZipEntry[]): Buffer {
   const parts: Buffer[] = []
   const central: Buffer[] = []
@@ -141,9 +205,9 @@ function writeZip(entries: ZipEntry[]): Buffer {
     const crc = crc32(entry.data)
     const local = Buffer.alloc(30)
     local.writeUInt32LE(0x04034b50, 0)
-    local.writeUInt16LE(20, 4) // version needed
-    local.writeUInt16LE(0x0800, 6) // UTF-8 文件名标志
-    local.writeUInt16LE(8, 8) // deflate
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(0x0800, 6)
+    local.writeUInt16LE(8, 8)
     local.writeUInt32LE(crc, 14)
     local.writeUInt32LE(compressed.length, 18)
     local.writeUInt32LE(entry.data.length, 22)
@@ -151,8 +215,8 @@ function writeZip(entries: ZipEntry[]): Buffer {
     parts.push(local, nameBuf, compressed)
     const dir = Buffer.alloc(46)
     dir.writeUInt32LE(0x02014b50, 0)
-    dir.writeUInt16LE(20, 4) // version made by
-    dir.writeUInt16LE(20, 6) // version needed
+    dir.writeUInt16LE(20, 4)
+    dir.writeUInt16LE(20, 6)
     dir.writeUInt16LE(0x0800, 8)
     dir.writeUInt16LE(8, 10)
     dir.writeUInt32LE(crc, 16)
@@ -166,14 +230,14 @@ function writeZip(entries: ZipEntry[]): Buffer {
   const centralBuf = Buffer.concat(central)
   const eocd = Buffer.alloc(22)
   eocd.writeUInt32LE(0x06054b50, 0)
-  eocd.writeUInt16LE(entries.length, 8) // 本盘条目数
-  eocd.writeUInt16LE(entries.length, 10) // 总条目数
+  eocd.writeUInt16LE(entries.length, 8)
+  eocd.writeUInt16LE(entries.length, 10)
   eocd.writeUInt32LE(centralBuf.length, 12)
   eocd.writeUInt32LE(offset, 16)
   return Buffer.concat([...parts, centralBuf, eocd])
 }
 
-/** zip 条目名安全化：拒绝绝对路径与 `..`，返回清理后的相对名。 */
+/** zip 条目名安全化:拒绝绝对路径与 `..`,返回清理后的相对名。 */
 function safeEntryName(name: string): string | undefined {
   const normalized = name.replace(/\\/g, '/')
   if (normalized.startsWith('/') || /[^\x20-￿]/.test(normalized)) return undefined
@@ -182,7 +246,7 @@ function safeEntryName(name: string): string | undefined {
   return segments.join('/')
 }
 
-/** 若所有条目共享同一个顶层目录（`<name>/SKILL.md` 形态）则剥掉它。 */
+/** 若所有条目共享同一个顶层目录(`<name>/SKILL.md` 形态)则剥掉它。 */
 function commonTopDir(entries: ZipEntry[]): string | undefined {
   const tops = new Set(entries.map(entry => entry.name.split('/')[0] ?? ''))
   if (tops.size !== 1) return undefined
@@ -190,17 +254,14 @@ function commonTopDir(entries: ZipEntry[]): string | undefined {
   return entries.every(entry => entry.name === top || entry.name.startsWith(`${top}/`)) ? top : undefined
 }
 
-/** 找包内 SKILL.md 条目（顶层或剥掉顶层目录后的顶层）。 */
+/** 找包内 SKILL.md 条目(顶层或剥掉顶层目录后的顶层)。 */
 function findSkillMd(entries: ZipEntry[]): ZipEntry | undefined {
   const top = commonTopDir(entries)
   const prefix = top === undefined ? '' : `${top}/`
   return entries.find(entry => entry.name === `${prefix}SKILL.md`)
 }
 
-/**
- * 把 .skill 包解到目标目录。目录式技能整树保留（references/、files/ 等
- * 资源由官方 skill-filesystem 的 resourceBase 机制可用）。
- */
+/** 把 .skill 包解到目标目录(整树保留资源)。 */
 async function extractZip(entries: ZipEntry[], destDir: string): Promise<void> {
   if (findSkillMd(entries) === undefined) throw new Error('.skill 包内没有 SKILL.md')
   const top = commonTopDir(entries)
@@ -209,13 +270,13 @@ async function extractZip(entries: ZipEntry[], destDir: string): Promise<void> {
     const stripped = prefix === '' ? entry.name : entry.name.slice(prefix.length)
     if (stripped === '') continue
     const safe = safeEntryName(stripped)
-    if (safe === undefined) throw new Error(`包内路径不安全：${entry.name}`)
+    if (safe === undefined) throw new Error(`包内路径不安全:${entry.name}`)
     await mkdir(path.dirname(path.join(destDir, safe)), { recursive: true })
     await writeFile(path.join(destDir, safe), entry.data)
   }
 }
 
-/** 多行 frontmatter 值的尽力而为读取（`description: |` 块取首个非空行）。 */
+/** 多行 frontmatter 值的尽力而为读取(`description: |` 块取首个非空行)。 */
 function scalarMultiline(lines: string[], key: string): string | undefined {
   const single = scalar(lines, key)
   if (single !== undefined && single !== '' && single !== '|' && single !== '>' && !single.startsWith('|-') && !single.startsWith('>-')) {
@@ -224,7 +285,7 @@ function scalarMultiline(lines: string[], key: string): string | undefined {
   const index = lines.findIndex(line => /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)?.[1] === key)
   if (index < 0) return undefined
   for (const line of lines.slice(index + 1)) {
-    if (/^\S/.test(line)) break // 回到顶格键：块结束
+    if (/^\S/.test(line)) break
     const trimmed = line.trim()
     if (trimmed === '') continue
     return trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed
@@ -232,11 +293,22 @@ function scalarMultiline(lines: string[], key: string): string | undefined {
   return undefined
 }
 
-/** dsh 主目录：$DSH_HOME 覆盖，默认 ~/.dsh（与 skill-filesystem provider 一致）。 */
+/** dsh 主目录:$DSH_HOME 覆盖,默认 ~/.dsh(与 skill-filesystem provider 一致)。 */
 function dshHome(): string {
   const env = process.env['DSH_HOME']
   return env !== undefined && env.trim() !== '' ? env : path.join(os.homedir(), '.dsh')
 }
+
+/** 把绝对路径的 home 前缀替换为 ~(仅展示/存储用)。 */
+function tildeDisplay(p: string): string {
+  const home = os.homedir()
+  if (p === home) return '~'
+  if (p.startsWith(home + path.sep)) return `~${p.slice(home.length)}`
+  return p
+}
+
+/** 常见技能目录候选(存在才会作为建议给出)。 */
+const KNOWN_SKILL_DIRS = ['~/.claude/skills', '~/.agents/skills', '~/.codex/skills', '~/.cursor/skills']
 
 function expandHome(p: string): string {
   if (p === '~') return os.homedir()
@@ -244,7 +316,7 @@ function expandHome(p: string): string {
   return p
 }
 
-/** 极简 frontmatter 拆分：只认首行 `---` 到下一行 `---` 的块。 */
+/** 极简 frontmatter 拆分:只认首行 `---` 到下一行 `---` 的块。 */
 function splitFrontmatter(text: string): { raw: string[], body: string } {
   if (!text.startsWith('---')) return { raw: [], body: text }
   const lines = text.split('\n')
@@ -259,12 +331,23 @@ function splitFrontmatter(text: string): { raw: string[], body: string } {
 function scalar(lines: string[], key: string): string | undefined {
   for (const line of lines) {
     const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)
-    if (match !== null && match[1] === key) return match[2]!.trim()
+    if (match !== null && match[1] === key) return unquoteYaml(match[2]!.trim())
   }
   return undefined
 }
 
-/** kebab-case 名称；无法得出时回退 'skill'。保证匹配 NAME_PATTERN。 */
+/** 剥除 YAML 标量的成对引号并反转义(双引号 \\" 与单引号 '' 两种方言)。 */
+function unquoteYaml(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/''/g, "'")
+  }
+  return value
+}
+
+/** kebab-case 名称;无法得出时回退 'skill'。保证匹配 NAME_PATTERN。 */
 function normalizeName(input: string): string {
   const kebab = input
     .toLowerCase()
@@ -283,104 +366,290 @@ function fallbackDescription(body: string): string {
     if (clean === '') continue
     return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean
   }
-  return '(no description)'
+  return '(无描述)'
 }
 
 interface ParsedSkill {
   name: string
   description: string
-  whenToUse: string
-  invocation: 'both' | 'user' | 'model'
   content: string
 }
 
 /**
- * 清洗管线入口：解析任意 Markdown/SKILL.md 文本，产出规范命名的
- * SKILL.md 全文。保留 name/description 之外的全部 frontmatter 原行
- * （whenToUse、metadata、disable-model-invocation、user-invocable 等）。
+ * 清洗管线(粘贴/平铺 .md 复制入库时用):解析任意 Markdown/SKILL.md 文本,
+ * 产出规范命名的 SKILL.md 全文。保留 name/description 之外的全部
+ * frontmatter 原行。引用与编辑保存不经过此管线(字节原样)。
  */
 function parseSkillText(text: string, fallbackName: string, fallbackDesc: string): ParsedSkill {
   const { raw, body } = splitFrontmatter(text.replace(/^﻿/, ''))
   const fmName = scalar(raw, 'name')
   const fmDescription = scalar(raw, 'description')
-  const fmWhenToUse = scalar(raw, 'whenToUse')
-  const disableModel = scalar(raw, 'disable-model-invocation') === 'true'
-  const userInvocable = scalar(raw, 'user-invocable')
-
-  let invocation: ParsedSkill['invocation'] = 'both'
-  if (disableModel) invocation = 'user'
-  else if (userInvocable === 'false') invocation = 'model'
-
   const name = normalizeName(fmName !== undefined && fmName !== '' ? fmName : fallbackName)
   const description = fmDescription !== undefined && fmDescription !== ''
     ? fmDescription
     : (fallbackDesc !== '' ? fallbackDesc : fallbackDescription(body))
-  const whenToUse = fmWhenToUse ?? ''
-
-  // 保留除 name/description 外的原始 frontmatter 行，维持未知键原样。
   const kept = raw.filter(line => {
     const match = /^([A-Za-z0-9_-]+):/.exec(line)
     return match === null || (match[1] !== 'name' && match[1] !== 'description')
   })
-
   const fmOut = [`name: ${name}`, `description: ${description}`, ...kept]
-  const content = `---\n${fmOut.join('\n')}\n---\n\n${body.trim()}\n`
-  return { name, description, whenToUse, invocation, content }
+  return { name, description, content: `---\n${fmOut.join('\n')}\n---\n\n${body.trim()}\n` }
 }
 
-/** 环回来源判定：dsh web 页面本身，或无 Origin 的本机进程（curl 等）。 */
-function originAllowed(req: IncomingMessage): boolean {
-  const origin = req.headers['origin']
-  if (origin === undefined) return true
-  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/iu.test(String(origin))
+/** frontmatter 行 → invocation 标签。 */
+function invocationOf(raw: string[]): string {
+  if (scalar(raw, 'disable-model-invocation') === 'true') return 'user'
+  return scalar(raw, 'user-invocable') === 'false' ? 'model' : 'both'
 }
 
-function hostIsLoopback(req: IncomingMessage): boolean {
-  const host = String(req.headers['host'] ?? '')
-  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/iu.test(host)
+/** 弱(src-json)调用描述符。 */
+interface WeakInvocation {
+  readonly id: string
+  readonly service: 'skillHub'
+  readonly namespace: 'skillHub'
+  readonly method: string
+  readonly invocation: { readonly kind: 'direct' }
+  readonly parameters: ReadonlyArray<{
+    readonly name: string
+    readonly wire: string
+    readonly source: 'json'
+    readonly codec: { readonly mode: 'src-json' }
+  }>
+  readonly result: { readonly mode: 'src-json' }
 }
 
-export function apply(ctx: Context): void {
-  const skillsDir = path.join(dshHome(), 'skills')
-  const trashDir = path.join(dshHome(), 'skill-trash')
-  const statePath = path.join(skillsDir, '.skill-manager.json')
+/** ctx.typert 注册面(宿主 dsh-typert-registry 提供;本包不依赖其类型)。 */
+interface TypertRegistryLike {
+  register(contribution: unknown): unknown
+}
 
-  /** 来源配置与导入清单共用一个状态文件；损坏时回退默认。 */
-  async function readState(): Promise<StateFile> {
+const TYPERT_MANIFEST = {
+  package: 'dsh-skill-hub',
+  face: 'host',
+  schemas: [],
+  model: { services: [], events: [], objects: [] },
+  invocations: [
+    {
+      id: 'dsh-skill-hub#skillHub/getState',
+      service: 'skillHub',
+      namespace: 'skillHub',
+      method: 'getState',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: { mode: 'src-json' },
+    },
+    {
+      id: 'dsh-skill-hub#skillHub/browseDirs',
+      service: 'skillHub',
+      namespace: 'skillHub',
+      method: 'browseDirs',
+      invocation: { kind: 'direct' },
+      parameters: [{ name: 'dirPath', wire: 'dirPath', source: 'json', codec: { mode: 'src-json' } }],
+      result: { mode: 'src-json' },
+    },
+    {
+      id: 'dsh-skill-hub#skillHub/runCommand',
+      service: 'skillHub',
+      namespace: 'skillHub',
+      method: 'runCommand',
+      invocation: { kind: 'direct' },
+      parameters: [{ name: 'command', wire: 'command', source: 'json', codec: { mode: 'src-json' } }],
+      result: { mode: 'src-json' },
+    },
+  ] satisfies WeakInvocation[],
+} as const
+
+/**
+ * skillHub 网关服务:全局技能库的状态/入库(引用|复制)/编辑/导出/删除。
+ * @param ctx - 宿主 Cordis 上下文。
+ */
+export class SkillHubGateway extends TypertRemoteService {
+  private readonly skillsDir = path.join(dshHome(), 'skills')
+  private readonly trashDir = path.join(dshHome(), 'skill-trash')
+  private readonly statePath = path.join(dshHome(), 'skills', '.skill-manager.json')
+
+  /** 注册 'skillHub' 服务键;typert registry 就绪后补登记弱清单。 */
+  constructor(ctx: Context) {
+    super(ctx, 'skillHub')
+    ctx.inject(['typert'], (typertCtx: Context) =>
+      (typertCtx as unknown as { typert: TypertRegistryLike }).typert.register(TYPERT_MANIFEST))
+  }
+
+  /** 全量状态(设置页首屏与每次命令后的刷新)。 */
+  async getState(): Promise<HubState> {
+    return await this.buildState('')
+  }
+
+  /** 执行一条面板命令,返回消息 + 刷新后的全量状态。 */
+  async runCommand(command: HubCommand): Promise<HubCommandResult> {
+    const result = await this.execute(command)
+    return {
+      message: result.message,
+      state: await this.buildState(result.message),
+      ...result.body === undefined ? {} : { body: result.body },
+      ...result.archiveBase64 === undefined ? {} : { archiveBase64: result.archiveBase64 },
+    }
+  }
+
+  /**
+   * 目录浏览器:列出一个目录的子目录与技能计数,供「选择扫描目录」使用。
+   * dirPath 传 '' 表示 home,并附带常见技能位置建议。
+   * @param dirPath - 要浏览的目录(支持 ~ 前缀;'' = home)。
+   */
+  async browseDirs(dirPath: string): Promise<BrowseResult> {
+    const isRoot = typeof dirPath !== 'string' || dirPath.trim() === ''
+    const target = path.resolve(expandHome(isRoot ? '~' : dirPath.trim()))
+    let entries
     try {
-      return JSON.parse(await readFile(statePath, 'utf8')) as StateFile
+      entries = await readdir(target, { withFileTypes: true })
+    } catch {
+      throw new Error(`无法读取目录:${tildeDisplay(target)}`)
+    }
+    const dirNames = entries.filter(entry => entry.isDirectory() || entry.isSymbolicLink()).map(entry => entry.name).slice(0, 400)
+    const dirs: BrowseEntry[] = []
+    let probes = 0
+    for (const name of dirNames) {
+      let skillCount = 0
+      if (probes < 60) {
+        probes += 1
+        skillCount = await this.countSkillShaped(path.join(target, name))
+      }
+      dirs.push({ name, skillCount })
+    }
+    dirs.sort((a, b) => b.skillCount - a.skillCount || a.name.localeCompare(b.name))
+    const parent = path.dirname(target)
+    const result: BrowseResult = {
+      path: target,
+      display: tildeDisplay(target),
+      ...parent === target ? {} : { parent },
+      dirs,
+    }
+    if (isRoot) {
+      const configured = new Set(((await this.readState()).sources ?? DEFAULT_SOURCES).map(source => path.resolve(expandHome(source))))
+      const suggestions: { path: string, skillCount: number }[] = []
+      for (const candidate of KNOWN_SKILL_DIRS) {
+        const absolute = path.resolve(expandHome(candidate))
+        if (configured.has(absolute)) continue
+        try {
+          const info = await stat(absolute)
+          if (!info.isDirectory()) continue
+        } catch {
+          continue
+        }
+        suggestions.push({ path: candidate, skillCount: await this.countSkillShaped(absolute) })
+      }
+      if (suggestions.length > 0) result.suggestions = suggestions
+    }
+    return result
+  }
+
+  /** 限量探测一个目录里的技能形态条目数(SKILL.md 目录 / 平铺 .md / .skill)。 */
+  private async countSkillShaped(dir: string): Promise<number> {
+    let names: string[]
+    try {
+      names = (await readdir(dir)).slice(0, 150)
+    } catch {
+      return 0
+    }
+    let count = 0
+    for (const name of names) {
+      if (name.startsWith('.')) continue
+      if (name.endsWith('.md') || name.endsWith('.skill')) { count += 1; continue }
+      try {
+        await stat(path.join(dir, name, 'SKILL.md'))
+        count += 1
+      } catch { /* 非技能目录 */ }
+    }
+    return count
+  }
+
+  private async readState(): Promise<StateFile> {
+    try {
+      return JSON.parse(await readFile(this.statePath, 'utf8')) as StateFile
     } catch {
       return {}
     }
   }
 
-  async function writeState(state: StateFile): Promise<void> {
-    await mkdir(skillsDir, { recursive: true })
-    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  private async writeState(state: StateFile): Promise<void> {
+    await mkdir(this.skillsDir, { recursive: true })
+    await writeFile(this.statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
   }
 
-  /** 扫描已安装技能：`<name>/SKILL.md` 目录式与 `<name>.md` 平铺式。 */
-  async function scanInstalled(): Promise<InstalledSkill[]> {
-    const state = await readState()
-    const out: InstalledSkill[] = []
+  /** 数一棵技能树里 SKILL.md 之外的文件数(限量,防大目录)。 */
+  private async countResources(dir: string): Promise<number> {
+    let count = 0
+    const walk = async (current: string, depth: number): Promise<void> => {
+      if (depth > 6 || count > 500) return
+      let entries
+      try {
+        entries = await readdir(current, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (entry.name === '.DS_Store') continue
+        const full = path.join(current, entry.name)
+        if (entry.isDirectory()) await walk(full, depth + 1)
+        else if (entry.isFile() && !(current === dir && (entry.name === 'SKILL.md' || entry.name === 'skill.md'))) count += 1
+      }
+    }
+    await walk(dir, 0)
+    return count
+  }
+
+  /** 扫描全局库:目录/平铺/符号链接条目 → HubSkill(含身份与失效标注)。 */
+  private async scanHub(): Promise<HubSkill[]> {
+    const state = await this.readState()
+    const out: HubSkill[] = []
     let entries: string[]
     try {
-      entries = await readdir(skillsDir)
+      entries = await readdir(this.skillsDir)
     } catch {
       return out
     }
     for (const entry of entries) {
       if (entry.startsWith('.')) continue
-      const full = path.join(skillsDir, entry)
+      const full = path.join(this.skillsDir, entry)
+      let linkInfo
+      try {
+        linkInfo = await lstat(full)
+      } catch {
+        continue
+      }
+      const isLink = linkInfo.isSymbolicLink()
+      let sourcePath = ''
+      if (isLink) {
+        try {
+          sourcePath = path.resolve(this.skillsDir, await readlink(full))
+        } catch { /* 读不出目标:按失效处理 */ }
+      }
       let info
       try {
-        info = await stat(full)
+        info = await stat(full) // 跟随链接
       } catch {
+        // 失效引用:目标消失。仍然展示,供用户处理。
+        const meta = state.skills?.[entry.replace(/\.md$/u, '')]
+        out.push({
+          name: entry.replace(/\.md$/u, ''),
+          description: '',
+          whenToUse: '',
+          invocation: 'both',
+          addedAt: meta?.addedAt ?? '',
+          mode: 'link',
+          sourcePath: meta?.source ?? sourcePath,
+          broken: true,
+          resourceCount: 0,
+          file: full,
+          dir: this.skillsDir,
+        })
         continue
       }
       let file: string | undefined
       let fallbackName = entry
+      let dir = this.skillsDir
       if (info.isDirectory()) {
+        dir = full
         for (const candidate of ['SKILL.md', 'skill.md']) {
           const probe = path.join(full, candidate)
           try {
@@ -404,42 +673,47 @@ export function apply(ctx: Context): void {
       }
       const { raw, body } = splitFrontmatter(text)
       const name = normalizeName(scalar(raw, 'name') ?? fallbackName)
-      const meta = state.skills?.[name]
+      const meta = state.skills?.[entry.replace(/\.md$/u, '')] ?? state.skills?.[name]
+      const mode: SkillMode = isLink ? 'link' : (meta?.mode ?? (meta?.source !== undefined && meta.source !== '' && meta.source !== 'paste' && meta.source !== 'edit' && meta.source !== 'upload' ? 'copy' : 'local'))
       out.push({
         name,
         description: scalarMultiline(raw, 'description') ?? fallbackDescription(body),
         whenToUse: scalar(raw, 'whenToUse') ?? '',
-        invocation: scalar(raw, 'disable-model-invocation') === 'true'
-          ? 'user'
-          : scalar(raw, 'user-invocable') === 'false' ? 'model' : 'both',
+        invocation: invocationOf(raw),
         addedAt: meta?.addedAt ?? '',
-        source: meta?.source ?? '',
+        mode,
+        sourcePath: isLink ? sourcePath : (mode === 'copy' ? meta?.source ?? '' : ''),
+        broken: false,
+        resourceCount: info.isDirectory() ? await this.countResources(full) : 0,
         file,
+        dir,
       })
     }
     out.sort((a, b) => a.name.localeCompare(b.name))
     return out
   }
 
-  /**
-   * 扫描外部来源目录中可导入的技能，剔除已安装同名项。三种形态：
-   * 目录式（含 SKILL.md + 资源树）、平铺 `.md`、Claude 网页版导出的
-   * `.skill` zip 包。
-   */
-  async function scanImportable(sources: string[], installed: InstalledSkill[]): Promise<ImportableSkill[]> {
-    const installedNames = new Set(installed.map(s => s.name))
-    const out = new Map<string, ImportableSkill>()
+  /** 扫描来源目录:尚未入库的技能(目录式/平铺 .md/.skill 包)+ 每目录状态。 */
+  private async scanDiscoverable(sources: string[], hub: HubSkill[]): Promise<{ discoverable: DiscoverableSkill[], sourceInfos: SourceInfo[] }> {
+    const hubNames = new Set(hub.map(s => s.name))
+    const hubSources = new Set(hub.map(s => s.sourcePath).filter(s => s !== ''))
+    const out = new Map<string, DiscoverableSkill>()
+    const sourceInfos: SourceInfo[] = []
     for (const source of sources) {
       const dir = expandHome(source)
       let entries: string[]
       try {
         entries = await readdir(dir)
       } catch {
+        sourceInfos.push({ path: source, exists: false, skillCount: 0 })
         continue
       }
+      let skillCount = 0
       for (const entry of entries) {
-        if (entry.startsWith('.') || installedNames.has(normalizeName(entry))) continue
+        if (entry.startsWith('.')) continue
         const full = path.join(dir, entry)
+        // 已以引用/副本身份入库:不再列入可发现,但计入目录技能数。
+        if (hubSources.has(full)) { skillCount += 1; continue }
         let info
         try {
           info = await stat(full)
@@ -447,9 +721,9 @@ export function apply(ctx: Context): void {
           continue
         }
         if (info.isFile() && entry.endsWith('.skill')) {
-          // 打包技能：解包内 SKILL.md 的 frontmatter 取名与描述
+          skillCount += 1
           let name = normalizeName(entry.replace(/\.skill$/iu, ''))
-          let description = '（打包技能）'
+          let description = '(打包技能)'
           try {
             const zipEntries = readZip(await readFile(full))
             const skillMd = findSkillMd(zipEntries)
@@ -458,19 +732,21 @@ export function apply(ctx: Context): void {
               name = normalizeName(scalar(raw, 'name') ?? name)
               description = scalarMultiline(raw, 'description') ?? fallbackDescription(body)
             }
-          } catch { /* 损坏的包按文件名展示，导入时报错 */ }
-          if (!installedNames.has(name) && !out.has(name)) {
-            out.set(name, { name, description, sourcePath: full })
+          } catch { /* 损坏的包按文件名展示,导入时报错 */ }
+          if (!hubNames.has(name) && !out.has(name)) {
+            out.set(name, { name, description, sourcePath: full, kind: 'archive' })
           }
           continue
         }
         let file: string | undefined
+        let kind: DiscoverableSkill['kind'] = 'md'
         let fallbackName = entry
         if (info.isDirectory()) {
           const probe = path.join(full, 'SKILL.md')
           try {
             await stat(probe)
             file = probe
+            kind = 'dir'
           } catch {
             continue
           }
@@ -481,6 +757,7 @@ export function apply(ctx: Context): void {
           continue
         }
         if (file === undefined) continue
+        skillCount += 1
         let text: string
         try {
           text = await readFile(file, 'utf8')
@@ -489,20 +766,22 @@ export function apply(ctx: Context): void {
         }
         const { raw, body } = splitFrontmatter(text)
         const name = normalizeName(scalar(raw, 'name') ?? fallbackName)
-        if (installedNames.has(name) || out.has(name)) continue
+        if (hubNames.has(name) || out.has(name)) continue
         out.set(name, {
           name,
           description: scalarMultiline(raw, 'description') ?? fallbackDescription(body),
-          sourcePath: info.isDirectory() ? full : file,
+          sourcePath: kind === 'dir' ? full : file,
+          kind,
         })
       }
+      sourceInfos.push({ path: source, exists: true, skillCount })
     }
-    return [...out.values()].sort((a, b) => a.name.localeCompare(b.name))
+    return { discoverable: [...out.values()].sort((a, b) => a.name.localeCompare(b.name)), sourceInfos }
   }
 
-  /** 技能名在 skillsDir 下对应的现有路径（目录式或平铺式），不存在则 undefined。 */
-  async function existingPath(name: string): Promise<string | undefined> {
-    for (const candidate of [path.join(skillsDir, name, 'SKILL.md'), path.join(skillsDir, `${name}.md`)]) {
+  /** 技能名在库里对应的现有路径(目录式或平铺式),不存在则 undefined。 */
+  private async existingPath(name: string): Promise<string | undefined> {
+    for (const candidate of [path.join(this.skillsDir, name, 'SKILL.md'), path.join(this.skillsDir, `${name}.md`)]) {
       try {
         await stat(candidate)
         return candidate
@@ -511,31 +790,39 @@ export function apply(ctx: Context): void {
     return undefined
   }
 
+  /** 名字对应的库条目(目录、平铺文件或符号链接本身),含失效链接。 */
+  private async entryPath(name: string): Promise<string | undefined> {
+    for (const candidate of [path.join(this.skillsDir, name), path.join(this.skillsDir, `${name}.md`)]) {
+      try {
+        await lstat(candidate)
+        return candidate
+      } catch { /* try next */ }
+    }
+    return undefined
+  }
+
   /** 同名已存在时追加 -2/-3… 序号。 */
-  async function uniqueName(base: string): Promise<string> {
-    if (await existingPath(base) === undefined) return base
+  private async uniqueName(base: string): Promise<string> {
+    if (await this.entryPath(base) === undefined) return base
     for (let i = 2; i < 100; i++) {
       const candidate = `${base}-${i}`
-      if (await existingPath(candidate) === undefined) return candidate
+      if (await this.entryPath(candidate) === undefined) return candidate
     }
     return `${base}-${Date.now()}`
   }
 
-  /** import 命令的 sourcePath 必须位于某个配置来源目录内，拒绝任意路径读取。 */
-  async function sourceAllowed(sourcePath: string): Promise<boolean> {
-    const sources = (await readState()).sources ?? DEFAULT_SOURCES
+  /** sourcePath 必须位于某个配置来源目录内,拒绝任意路径读取。 */
+  private async sourceAllowed(sourcePath: string): Promise<boolean> {
+    const sources = (await this.readState()).sources ?? DEFAULT_SOURCES
     for (const source of sources) {
       const root = `${expandHome(source).replace(/\/+$/, '')}/`
       if (sourcePath.startsWith(root)) return true
     }
-    return sourcePath.startsWith(`${skillsDir.replace(/\/+$/, '')}/`)
+    return sourcePath.startsWith(`${this.skillsDir.replace(/\/+$/, '')}/`)
   }
 
-  /**
-   * 把技能目录里 SKILL.md 的 frontmatter `name:` 同步为最终目录名。
-   * 去重安装（-2/-3 序号）或 frontmatter 与目录名不一致时，身份以目录为准。
-   */
-  async function syncFrontmatterName(dir: string, name: string): Promise<void> {
+  /** 把技能目录里 SKILL.md 的 frontmatter `name:` 同步为最终目录名(仅副本)。 */
+  private async syncFrontmatterName(dir: string, name: string): Promise<void> {
     const skillMd = path.join(dir, 'SKILL.md')
     let text: string
     try {
@@ -551,30 +838,34 @@ export function apply(ctx: Context): void {
     await writeFile(skillMd, updated, 'utf8')
   }
 
-  /** 安装 .skill 包：名称取包内 frontmatter，整树解压到 skills/<name>/。 */
-  async function installArchive(entries: ZipEntry[], fallbackName: string, source: string): Promise<{ message: string }> {
+  private async recordSkill(key: string, source: string, mode: SkillMode): Promise<void> {
+    const state = await this.readState()
+    state.skills = { ...state.skills, [key]: { addedAt: new Date().toISOString(), source, mode } }
+    await this.writeState(state)
+  }
+
+  /** 安装 .skill 包(只能复制):整树解压到 skills/<name>/。 */
+  private async installArchive(entries: ZipEntry[], fallbackName: string, source: string): Promise<{ message: string }> {
     let name = fallbackName
     const skillMd = findSkillMd(entries)
     if (skillMd !== undefined) {
       const fmName = scalar(splitFrontmatter(skillMd.data.toString('utf8')).raw, 'name')
       if (fmName !== undefined && fmName !== '') name = normalizeName(fmName)
     }
-    name = await uniqueName(name)
+    name = await this.uniqueName(name)
     try {
-      await extractZip(entries, path.join(skillsDir, name))
+      await extractZip(entries, path.join(this.skillsDir, name))
     } catch (error) {
-      ctx.logger.warn(error)
-      return { message: `导入失败：${error instanceof Error ? error.message : String(error)}` }
+      this.ctx.logger.warn(error)
+      return { message: `入库失败:${error instanceof Error ? error.message : String(error)}` }
     }
-    await syncFrontmatterName(path.join(skillsDir, name), name)
-    const state = await readState()
-    state.skills = { ...state.skills, [name]: { addedAt: new Date().toISOString(), source } }
-    await writeState(state)
-    return { message: `已导入技能「${name}」（含全部资源文件）` }
+    await this.syncFrontmatterName(path.join(this.skillsDir, name), name)
+    await this.recordSkill(name, source, 'copy')
+    return { message: `已复制入库「${name}」(含全部资源文件)` }
   }
 
-  /** 递归收集技能目录为 zip 条目（`<name>/<相对路径>`）。 */
-  async function collectTree(rootDir: string, prefix: string): Promise<ZipEntry[]> {
+  /** 递归收集技能目录为 zip 条目(`<name>/<相对路径>`)。 */
+  private async collectTree(rootDir: string, prefix: string): Promise<ZipEntry[]> {
     const out: ZipEntry[] = []
     const walk = async (dir: string, rel: string): Promise<void> => {
       const entries = await readdir(dir, { withFileTypes: true })
@@ -590,161 +881,221 @@ export function apply(ctx: Context): void {
     return out
   }
 
-  async function execute(cmd: StateCommand): Promise<{ message: string, body?: { name: string, content: string }, archiveBase64?: string }> {
+  /** 引用入库:skills/<name> 符号链接 → 来源目录/文件。 */
+  private async importLink(sourcePath: string): Promise<{ message: string }> {
+    if (sourcePath === '' || !await this.sourceAllowed(sourcePath)) {
+      return { message: '引用失败:来源路径不在配置的来源目录内' }
+    }
+    let info
+    try {
+      info = await stat(sourcePath)
+    } catch {
+      return { message: '引用失败:无法读取来源' }
+    }
+    if (sourcePath.endsWith('.skill')) {
+      return { message: '打包技能(.skill)没有可引用的目录,请用「复制」入库' }
+    }
+    // 名字取 frontmatter(目录读 SKILL.md;平铺读文件本身)
+    let name = normalizeName(path.basename(sourcePath).replace(/\.md$/iu, ''))
+    try {
+      const text = info.isDirectory()
+        ? await readFile(path.join(sourcePath, 'SKILL.md'), 'utf8')
+        : await readFile(sourcePath, 'utf8')
+      name = normalizeName(scalar(splitFrontmatter(text).raw, 'name') ?? name)
+    } catch { /* 读不到就用路径名 */ }
+    const hub = await this.scanHub()
+    const collides = hub.some(skill => skill.name === name)
+    const linkKey = await this.uniqueName(name)
+    const linkPath = info.isDirectory()
+      ? path.join(this.skillsDir, linkKey)
+      : path.join(this.skillsDir, `${linkKey}.md`)
+    await mkdir(this.skillsDir, { recursive: true })
+    try {
+      const type = info.isDirectory() ? (process.platform === 'win32' ? 'junction' : 'dir') : 'file'
+      await symlink(sourcePath, linkPath, type)
+    } catch (error) {
+      this.ctx.logger.warn(error)
+      // Windows 无特权符号链接失败时退化为复制,如实告知。
+      if (process.platform === 'win32' && info.isFile()) {
+        await cp(sourcePath, linkPath, { dereference: true })
+        await this.recordSkill(linkKey, sourcePath, 'copy')
+        return { message: `此平台无法创建文件符号链接,「${name}」已改为复制入库` }
+      }
+      return { message: `引用失败:${error instanceof Error ? error.message : String(error)}` }
+    }
+    await this.recordSkill(linkKey, sourcePath, 'link')
+    const note = collides ? `;注意:库里已有同名技能,同名时只有一个会生效` : ''
+    return { message: `已引用「${name}」→ ${sourcePath}(编辑即编辑来源;新会话立即可用,已打开的会话刷新页面后 / 菜单可见)${note}` }
+  }
+
+  /** 复制入库(目录整树 / .skill 解压 / 平铺 .md 清洗)。 */
+  private async importCopy(sourcePath: string): Promise<{ message: string }> {
+    if (sourcePath === '' || !await this.sourceAllowed(sourcePath)) {
+      return { message: '复制失败:来源路径不在配置的来源目录内' }
+    }
+    let info
+    try {
+      info = await stat(sourcePath)
+    } catch (error) {
+      this.ctx.logger.warn(error)
+      return { message: '复制失败:无法读取来源' }
+    }
+    if (info.isDirectory()) {
+      let name = normalizeName(path.basename(sourcePath))
+      try {
+        const text = await readFile(path.join(sourcePath, 'SKILL.md'), 'utf8')
+        name = normalizeName(scalar(splitFrontmatter(text).raw, 'name') ?? name)
+      } catch { /* 无 frontmatter 时用目录名 */ }
+      const finalName = await this.uniqueName(name)
+      try {
+        await cp(sourcePath, path.join(this.skillsDir, finalName), { recursive: true, dereference: true })
+      } catch (error) {
+        this.ctx.logger.warn(error)
+        return { message: '复制失败:拷贝技能目录出错' }
+      }
+      await this.syncFrontmatterName(path.join(this.skillsDir, finalName), finalName)
+      await this.recordSkill(finalName, sourcePath, 'copy')
+      return { message: `已复制入库「${finalName}」(含全部资源文件)` }
+    }
+    if (sourcePath.endsWith('.skill')) {
+      let entries: ZipEntry[]
+      try {
+        entries = readZip(await readFile(sourcePath))
+      } catch (error) {
+        this.ctx.logger.warn(error)
+        return { message: `复制失败:${error instanceof Error ? error.message : String(error)}` }
+      }
+      return await this.installArchive(entries, normalizeName(path.basename(sourcePath).replace(/\.skill$/iu, '')), sourcePath)
+    }
+    let text: string
+    try {
+      text = await readFile(sourcePath, 'utf8')
+    } catch (error) {
+      this.ctx.logger.warn(error)
+      return { message: '复制失败:无法读取来源文件' }
+    }
+    const parsed = parseSkillText(text, path.basename(sourcePath).replace(/\.md$/iu, ''), '')
+    const name = await this.uniqueName(parsed.name)
+    await mkdir(path.join(this.skillsDir, name), { recursive: true })
+    await writeFile(path.join(this.skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
+    await this.recordSkill(name, sourcePath, 'copy')
+    return { message: `已复制入库「${name}」` }
+  }
+
+  private async execute(cmd: HubCommand): Promise<{ message: string, body?: { name: string, content: string }, archiveBase64?: string }> {
     switch (cmd.action) {
       case 'rescan':
         return { message: '已刷新技能列表' }
-      case 'import': {
-        const sourcePath = cmd.sourcePath ?? ''
-        if (sourcePath === '' || !await sourceAllowed(sourcePath)) {
-          return { message: '导入失败：来源路径不在配置的来源目录内' }
+      case 'importLink':
+        return await this.importLink(cmd.sourcePath ?? '')
+      case 'importLinkBatch': {
+        const sourcePaths = cmd.sourcePaths ?? []
+        if (sourcePaths.length === 0) return { message: '批量引用:没有收到来源' }
+        let linked = 0
+        const failures: string[] = []
+        for (const sourcePath of sourcePaths) {
+          const result = await this.importLink(sourcePath)
+          if (result.message.startsWith('已引用')) linked += 1
+          else failures.push(result.message)
         }
-        let info
-        try {
-          info = await stat(sourcePath)
-        } catch (error) {
-          ctx.logger.warn(error)
-          return { message: '导入失败：无法读取来源' }
-        }
-        // 目录式技能：整树拷贝（SKILL.md + references/ 等资源），保持字节原样
-        if (info.isDirectory()) {
-          let name = normalizeName(path.basename(sourcePath))
-          try {
-            const text = await readFile(path.join(sourcePath, 'SKILL.md'), 'utf8')
-            name = normalizeName(scalar(splitFrontmatter(text).raw, 'name') ?? name)
-          } catch { /* 无 frontmatter 时用目录名 */ }
-          const finalName = await uniqueName(name)
-          try {
-            await cp(sourcePath, path.join(skillsDir, finalName), { recursive: true, dereference: true })
-          } catch (error) {
-            ctx.logger.warn(error)
-            return { message: '导入失败：拷贝技能目录出错' }
-          }
-          await syncFrontmatterName(path.join(skillsDir, finalName), finalName)
-          const state = await readState()
-          state.skills = { ...state.skills, [finalName]: { addedAt: new Date().toISOString(), source: sourcePath } }
-          await writeState(state)
-          return { message: `已导入技能「${finalName}」（含全部资源文件）` }
-        }
-        // .skill 打包：整包解压
-        if (sourcePath.endsWith('.skill')) {
-          let entries: ZipEntry[]
-          try {
-            entries = readZip(await readFile(sourcePath))
-          } catch (error) {
-            ctx.logger.warn(error)
-            return { message: `导入失败：${error instanceof Error ? error.message : String(error)}` }
-          }
-          return await installArchive(entries, normalizeName(path.basename(sourcePath).replace(/\.skill$/iu, '')), sourcePath)
-        }
-        // 平铺 .md：走清洗管线
-        let text: string
-        try {
-          text = await readFile(sourcePath, 'utf8')
-        } catch (error) {
-          ctx.logger.warn(error)
-          return { message: '导入失败：无法读取来源文件' }
-        }
-        const parsed = parseSkillText(text, path.basename(sourcePath).replace(/\.md$/iu, ''), '')
-        const name = await uniqueName(parsed.name)
-        await mkdir(path.join(skillsDir, name), { recursive: true })
-        await writeFile(path.join(skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
-        const state = await readState()
-        state.skills = { ...state.skills, [name]: { addedAt: new Date().toISOString(), source: sourcePath } }
-        await writeState(state)
-        return { message: `已导入技能「${name}」` }
+        const failNote = failures.length > 0 ? `;${failures.length} 个失败(${failures[0]!})` : ''
+        return { message: `批量引用完成:${linked}/${sourcePaths.length} 个入库${failNote}` }
       }
+      case 'importCopy':
+        return await this.importCopy(cmd.sourcePath ?? '')
       case 'importArchive': {
         const archiveBase64 = cmd.archiveBase64 ?? ''
-        if (archiveBase64 === '') return { message: '导入失败：没有收到文件内容' }
+        if (archiveBase64 === '') return { message: '入库失败:没有收到文件内容' }
         let entries: ZipEntry[]
         try {
           entries = readZip(Buffer.from(archiveBase64, 'base64'))
         } catch (error) {
-          ctx.logger.warn(error)
-          return { message: `导入失败：${error instanceof Error ? error.message : String(error)}` }
+          this.ctx.logger.warn(error)
+          return { message: `入库失败:${error instanceof Error ? error.message : String(error)}` }
         }
         const fallbackName = normalizeName((cmd.name ?? '').replace(/\.skill$/iu, ''))
-        return await installArchive(entries, fallbackName, 'upload')
+        return await this.installArchive(entries, fallbackName, 'upload')
       }
       case 'importPaste': {
         const content = cmd.content ?? ''
-        if (content.trim() === '') return { message: '导入失败：内容为空' }
+        if (content.trim() === '') return { message: '创建失败:内容为空' }
         const parsed = parseSkillText(content, cmd.name ?? '', cmd.description ?? '')
-        const name = await uniqueName(parsed.name)
-        await mkdir(path.join(skillsDir, name), { recursive: true })
-        await writeFile(path.join(skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
-        const state = await readState()
-        state.skills = { ...state.skills, [name]: { addedAt: new Date().toISOString(), source: 'paste' } }
-        await writeState(state)
-        return { message: `已导入技能「${name}」` }
+        const name = await this.uniqueName(parsed.name)
+        await mkdir(path.join(this.skillsDir, name), { recursive: true })
+        await writeFile(path.join(this.skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
+        await this.recordSkill(name, 'paste', 'local')
+        return { message: `已创建技能「${name}」` }
       }
       case 'read': {
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '读取失败：技能名不合法' }
-        const file = await existingPath(name)
-        if (file === undefined) return { message: `读取失败：找不到技能「${name}」` }
+        if (!NAME_PATTERN.test(name)) return { message: '读取失败:技能名不合法' }
+        const file = await this.existingPath(name)
+        if (file === undefined) return { message: `读取失败:找不到技能「${name}」` }
         return { message: `已读取「${name}」`, body: { name, content: await readFile(file, 'utf8') } }
       }
       case 'save': {
+        // 保存 = 字节原样写回 SKILL.md(引用技能写穿链接,直达来源)。
+        // 不再经清洗管线:编辑器所见即落盘内容。
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '保存失败：技能名不合法' }
-        const parsed = parseSkillText(cmd.content ?? '', name, '')
-        await mkdir(path.join(skillsDir, name), { recursive: true })
-        await writeFile(path.join(skillsDir, name, 'SKILL.md'), parsed.content, 'utf8')
-        const state = await readState()
-        if (state.skills?.[name] === undefined) {
-          state.skills = { ...state.skills, [name]: { addedAt: new Date().toISOString(), source: 'edit' } }
-          await writeState(state)
-        }
+        if (!NAME_PATTERN.test(name)) return { message: '保存失败:技能名不合法' }
+        const file = await this.existingPath(name)
+        if (file === undefined) return { message: `保存失败:找不到技能「${name}」` }
+        await writeFile(file, cmd.content ?? '', 'utf8')
         return { message: `已保存「${name}」` }
       }
       case 'delete': {
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '删除失败：技能名不合法' }
-        const file = await existingPath(name)
-        if (file === undefined) return { message: `删除失败：找不到技能「${name}」` }
-        // 目录式技能连目录一起进回收站，平铺式只移文件本身。
-        const dir = path.dirname(file)
-        const target = path.basename(dir) === name ? dir : file
-        await mkdir(trashDir, { recursive: true })
-        await rename(target, path.join(trashDir, `${Date.now()}-${name}`))
-        const state = await readState()
-        if (state.skills?.[name] !== undefined) {
-          delete state.skills[name]
-          await writeState(state)
+        if (!NAME_PATTERN.test(name)) return { message: '删除失败:技能名不合法' }
+        const entry = await this.entryPath(name)
+        if (entry === undefined) return { message: `删除失败:找不到技能「${name}」` }
+        const linkInfo = await lstat(entry)
+        const state = await this.readState()
+        const key = path.basename(entry).replace(/\.md$/u, '')
+        if (linkInfo.isSymbolicLink()) {
+          // 引用:只删链接,绝不触碰来源。
+          await unlink(entry)
+          if (state.skills?.[key] !== undefined) {
+            delete state.skills[key]
+            await this.writeState(state)
+          }
+          return { message: `已移除引用「${name}」(来源文件未动)` }
         }
-        return { message: `已删除「${name}」（可在 skill-trash 目录找回）` }
+        await mkdir(this.trashDir, { recursive: true })
+        await rename(entry, path.join(this.trashDir, `${Date.now()}-${name}`))
+        if (state.skills?.[key] !== undefined) {
+          delete state.skills[key]
+          await this.writeState(state)
+        }
+        return { message: `已删除「${name}」(可在 skill-trash 目录找回)` }
       }
       case 'export': {
         const name = cmd.name ?? ''
-        if (!NAME_PATTERN.test(name)) return { message: '导出失败：技能名不合法' }
-        const file = await existingPath(name)
-        if (file === undefined) return { message: `导出失败：找不到技能「${name}」` }
+        if (!NAME_PATTERN.test(name)) return { message: '导出失败:技能名不合法' }
+        const file = await this.existingPath(name)
+        if (file === undefined) return { message: `导出失败:找不到技能「${name}」` }
         try {
           const dir = path.dirname(file)
-          const isBundle = path.basename(dir) === name
-          // 目录式：整树打包；平铺式：单文件也按 <name>/SKILL.md 形态打包
+          const isBundle = path.basename(dir) !== path.basename(this.skillsDir)
           const entries = isBundle
-            ? await collectTree(dir, name)
+            ? await this.collectTree(dir, name)
             : [{ name: `${name}/SKILL.md`, data: await readFile(file) }]
-          if (!entries.some(entry => entry.name === `${name}/SKILL.md`)) {
-            return { message: `导出失败：「${name}」缺少 SKILL.md` }
+          if (!entries.some(entry => entry.name === `${name}/SKILL.md` || entry.name === `${name}/skill.md`)) {
+            return { message: `导出失败:「${name}」缺少 SKILL.md` }
           }
           return { message: `已导出「${name}」为 .skill 包`, archiveBase64: writeZip(entries).toString('base64') }
         } catch (error) {
-          ctx.logger.warn(error)
-          return { message: '导出失败：打包出错' }
+          this.ctx.logger.warn(error)
+          return { message: '导出失败:打包出错' }
         }
       }
       case 'setSources': {
         const sources = cmd.sources ?? []
         if (sources.some(s => typeof s !== 'string' || s.trim() === '')) {
-          return { message: '保存失败：来源目录列表不合法' }
+          return { message: '保存失败:来源目录列表不合法' }
         }
-        const state = await readState()
+        const state = await this.readState()
         state.sources = sources
-        await writeState(state)
+        await this.writeState(state)
         return { message: '已保存来源配置' }
       }
       default:
@@ -752,133 +1103,12 @@ export function apply(ctx: Context): void {
     }
   }
 
-  async function buildStatus(message: string): Promise<StateStatus> {
-    const installed = await scanInstalled()
-    const sources = (await readState()).sources ?? DEFAULT_SOURCES
-    return { message, installed, importable: await scanImportable(sources, installed) }
+  private async buildState(message: string): Promise<HubState> {
+    const skills = await this.scanHub()
+    const sourcePaths = (await this.readState()).sources ?? DEFAULT_SOURCES
+    const { discoverable, sourceInfos } = await this.scanDiscoverable(sourcePaths, skills)
+    return { message, skills, discoverable, sources: sourceInfos }
   }
-
-  /**
-   * CORS 回显：originAllowed 已把 Origin 限定为本机环回地址，这里必须
-   * 原样回显该值——写死 127.0.0.1 会让 localhost 页面上的跨源 fetch
-   *（页面 localhost:3080 → sidecar 127.0.0.1:318x）全部失败。
-   */
-  function allowedOrigin(req: IncomingMessage): string {
-    const origin = req.headers['origin']
-    return origin === undefined ? 'http://127.0.0.1' : String(origin)
-  }
-
-  function sendJson(req: IncomingMessage, res: ServerResponse, status: number, payload: unknown): void {
-    res.writeHead(status, {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      'access-control-allow-origin': allowedOrigin(req),
-      vary: 'Origin',
-    })
-    res.end(JSON.stringify(payload))
-  }
-
-  /** 读定长请求体；超限与坏 JSON 都变成 4xx 而不是断连。 */
-  function readBody(req: IncomingMessage): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = []
-      let size = 0
-      req.on('data', (chunk: Buffer) => {
-        size += chunk.length
-        if (size > MAX_BODY_BYTES) {
-          reject(new Error('payload too large'))
-          req.destroy()
-          return
-        }
-        chunks.push(chunk)
-      })
-      req.on('end', () => resolve(Buffer.concat(chunks)))
-      req.on('error', reject)
-    })
-  }
-
-  const server: Server = createServer((req, res) => {
-    if (!originAllowed(req) || !hostIsLoopback(req)) {
-      sendJson(req, res, 403, { ok: false, error: 'forbidden' })
-      return
-    }
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        'access-control-allow-origin': allowedOrigin(req),
-        'access-control-allow-methods': 'GET, POST',
-        'access-control-allow-headers': 'content-type',
-        'access-control-max-age': '86400',
-        vary: 'Origin',
-      })
-      res.end()
-      return
-    }
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    if (req.method === 'GET' && url.pathname === '/ping') {
-      sendJson(req, res, 200, { ok: true, plugin: name })
-      return
-    }
-    if (req.method === 'GET' && url.pathname === '/state') {
-      void buildStatus('')
-        .then(async status => sendJson(req, res, 200, {
-          ok: true,
-          status,
-          sources: (await readState()).sources ?? DEFAULT_SOURCES,
-        }))
-        .catch((error: unknown) => {
-          ctx.logger.warn(error)
-          sendJson(req, res, 500, { ok: false, error: 'state build failed' })
-        })
-      return
-    }
-    if (req.method === 'POST' && url.pathname === '/command') {
-      void readBody(req)
-        .then(async raw => {
-          const cmd = JSON.parse(raw.toString('utf8')) as StateCommand
-          const result = await execute(cmd)
-          const status = await buildStatus(result.message)
-          sendJson(req, res, 200, {
-            ok: true,
-            message: result.message,
-            status,
-            ...result.body === undefined ? {} : { body: result.body },
-            ...result.archiveBase64 === undefined ? {} : { archiveBase64: result.archiveBase64 },
-          })
-        })
-        .catch((error: unknown) => {
-          ctx.logger.warn(error)
-          sendJson(req, res, 400, { ok: false, error: error instanceof Error ? error.message : 'bad request' })
-        })
-      return
-    }
-    sendJson(req, res, 404, { ok: false, error: 'not found' })
-  })
-
-  /** 依序试绑端口范围；全占满时退到 OS 随机端口并告警（发现协议会失效）。 */
-  function listen(index: number): void {
-    if (index >= PORT_RANGE.length) {
-      server.listen(0, '127.0.0.1', () => {
-        const address = server.address()
-        const port = typeof address === 'object' && address !== null ? String(address.port) : '?'
-        ctx.logger.warn(`dsh-skill-manager: 端口 ${String(PORT_RANGE[0])}–${String(PORT_RANGE.at(-1))} 均被占用，退到随机端口 ${port}（浏览器面板将无法自动发现）`)
-      })
-      return
-    }
-    server.once('error', () => listen(index + 1))
-    server.listen(PORT_RANGE[index]!, '127.0.0.1', () => {
-      // 失败的那次 listen 的回调不会被消费：端口占用重试后，旧回调会在
-      // 最终成功时补跑。以实际绑定地址为准，只记真实端口的一条日志。
-      const address = server.address()
-      const bound = typeof address === 'object' && address !== null ? address.port : undefined
-      if (bound === PORT_RANGE[index]) {
-        ctx.logger.info(`dsh-skill-manager: sidecar 已就绪 http://127.0.0.1:${String(bound)}`)
-      }
-    })
-  }
-
-  listen(0)
-
-  ctx.effect(() => () => {
-    server.close()
-  })
 }
+
+export default SkillHubGateway

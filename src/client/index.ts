@@ -1,34 +1,28 @@
 /**
- * dsh-skill-manager 的浏览器端 half（React 设置页）。
+ * dsh-skill-hub 的浏览器端 half(React 设置页)。
  *
- * 管理面板注册进官方设置域的 settings.section 槽（与 Models / Plugins
- * 同级的导航页），不再使用独立浮动入口：
- * - 已安装：编辑 / 保存 / 删除（回收站）/ 打开目录 / 复制 /名称。
- * - 可导入：从配置的来源目录（默认 ~/.claude/skills）一键导入。
- * - 粘贴导入：名称 + 描述 + 正文直接落为标准 SKILL.md。
- * - 来源：管理来源目录列表。
- *
- * 数据通道：本插件宿主 half 的环回 sidecar HTTP 服务（官方 RPC map 对第
- * 三方固定，settings 线上面有白名单围栏）。面板按 3180–3189 的顺序探测
- * GET /ping 定位服务。「打开目录」走官方 host.openPath RPC。导入的技能由
- * 官方 skill-filesystem 自动发现，随即出现在 `/` 斜杠菜单中。
+ * 管理面板注册进官方设置域的 settings.section 槽(与 Models / Plugins
+ * 同级的导航页)。数据通道:宿主 skillHub 网关的 typert RPC——$mount
+ * 手写描述符(src 直调,identity 编解码,负载由宿主校验),此前的
+ * 3180–3189 端口探测 sidecar 已移除。「打开目录」走官方 host.openPath。
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// 类型边界：'settings.section' 的 SlotMap 声明（ui-settings 的 declare
-// module 合并）。仅类型，编译后擦除。
+// 类型边界:'settings.section' 的 SlotMap 声明(ui-settings 的 declare
+// module 合并)。仅类型,编译后擦除。
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { SkillManagerSection } from './SkillManagerSection.tsx'
+import type { BrowseResult, HubCommand, HubCommandResult, HubState } from '../index.js'
+import { SkillHubSection } from './SkillHubSection.tsx'
 
-export { SkillManagerSection } from './SkillManagerSection.tsx'
+export { SkillHubSection } from './SkillHubSection.tsx'
 
-/** ctx.locale 的最小面：注册词典 + 绑定翻译函数(官方设置页同一机制)。 */
+/** ctx.locale 的最小面:注册词典 + 绑定翻译函数(官方设置页同一机制)。 */
 interface LocaleFace {
   register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): unknown
   bind(ns: string): (key: string) => string
 }
 
 /** 词典命名空间。 */
-const NS = 'dsh-skill-manager'
+const NS = 'dsh-skill-hub'
 
 const en = { nav: 'Skills' }
 const zh = { nav: '技能' }
@@ -43,14 +37,92 @@ interface ConnectionHandle {
   api: ApiClient
 }
 
-/** 依赖的服务：槽系统（settings.section 注册）。connection 惰性获取。 */
-export const inject = ['slots']
+/** RPC 结果的共用外形。 */
+type RpcResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
+
+/** skillHub 命名空间挂载后的调用面。 */
+interface SkillHubCalls {
+  getState(): Promise<RpcResult<HubState>>
+  runCommand(command: HubCommand): Promise<RpcResult<HubCommandResult>>
+  browseDirs(dirPath: string): Promise<RpcResult<BrowseResult>>
+}
+
+/** ctx.remote 的最小面。 */
+interface RemoteFace {
+  $mount(contribution: { package: string; descriptors: readonly unknown[] }): Promise<() => Promise<void>>
+  skillHub: SkillHubCalls
+}
+
+/** identity 编解码:负载原样过 wire,校验交给宿主端。 */
+const passCodec = (typeSymbol: string) => ({ mode: 'strict' as const, typeSymbol, schema: { parse: (value: unknown) => value } })
+
+const DESCRIPTORS = [
+  {
+    id: 'dsh-skill-hub#skillHub/getState',
+    service: 'skillHub',
+    namespace: 'skillHub',
+    method: 'getState',
+    invocation: { kind: 'direct' as const },
+    parameters: [],
+    result: passCodec('dsh-skill-hub#HubState'),
+  },
+  {
+    id: 'dsh-skill-hub#skillHub/browseDirs',
+    service: 'skillHub',
+    namespace: 'skillHub',
+    method: 'browseDirs',
+    invocation: { kind: 'direct' as const },
+    parameters: [{ name: 'dirPath', wire: 'dirPath', source: 'json' as const, codec: passCodec('dsh-skill-hub#DirPath') }],
+    result: passCodec('dsh-skill-hub#BrowseResult'),
+  },
+  {
+    id: 'dsh-skill-hub#skillHub/runCommand',
+    service: 'skillHub',
+    namespace: 'skillHub',
+    method: 'runCommand',
+    invocation: { kind: 'direct' as const },
+    parameters: [{ name: 'command', wire: 'command', source: 'json' as const, codec: passCodec('dsh-skill-hub#HubCommand') }],
+    result: passCodec('dsh-skill-hub#HubCommandResult'),
+  },
+]
+
+function unwrap<T>(result: RpcResult<T>): T {
+  if (result.ok) return result.value
+  throw new Error(`${result.error.code}: ${result.error.message}`)
+}
+
+/** 依赖的服务:槽系统、remote 挂载面。connection / locale 惰性获取。 */
+export const inject = ['slots', 'remote']
 
 /**
- * 客户端插件体：把技能管理面板注册为设置里的一个独立导航页。
+ * 客户端插件体:挂载 RPC 描述符,把技能中枢面板注册为设置导航页。
  * @param ctx - 客户端根上下文。
  */
-export function apply(ctx: ClientContext): void {
+export async function apply(ctx: ClientContext): Promise<void> {
+  const remote = (ctx as unknown as { remote: RemoteFace }).remote
+  const disposeRemote = await remote.$mount({ package: 'dsh-skill-hub', descriptors: DESCRIPTORS })
+  ctx.effect(() => () => { void disposeRemote() }, 'dsh-skill-hub: 远端描述符挂载')
+
+  let calls: SkillHubCalls | undefined
+  ctx.inject(['remote', 'remote.skillHub'], (namespaceCtx: ClientContext): void => {
+    calls = (namespaceCtx as unknown as { remote: RemoteFace }).remote.skillHub
+  })
+
+  const api = {
+    getState: async (): Promise<HubState> => {
+      if (calls === undefined) throw new Error('skillHub 服务未就绪')
+      return unwrap(await calls.getState())
+    },
+    runCommand: async (command: HubCommand): Promise<HubCommandResult> => {
+      if (calls === undefined) throw new Error('skillHub 服务未就绪')
+      return unwrap(await calls.runCommand(command))
+    },
+    browseDirs: async (dirPath: string): Promise<BrowseResult> => {
+      if (calls === undefined) throw new Error('skillHub 服务未就绪')
+      return unwrap(await calls.browseDirs(dirPath))
+    },
+  }
+
   const openPath = (path: string): void => {
     try {
       const connection = ctx.get('connection') as ConnectionHandle | undefined
@@ -59,21 +131,19 @@ export function apply(ctx: ClientContext): void {
   }
 
   // 导航标签走官方 locale 服务:英文界面显示 Skills,中文显示 技能。
-  // 动态 inject:locale 由 ui-settings-general 等官方包提供,web shell 必有;
-  // 组合里万一缺席也只是本页不注册,不阻塞 boot。
   ctx.inject(['locale'], (localeCtx: ClientContext) => {
     const locale = (localeCtx as unknown as { locale: LocaleFace }).locale
     ctx.effect(() => {
       const dispose = locale.register(NS, { zh, en })
       return () => { if (typeof dispose === 'function') dispose() }
-    }, 'dsh-skill-manager: 词典注册')
+    }, 'dsh-skill-hub: 词典注册')
     const t = locale.bind(NS)
     ctx.slots.inject('settings.section', () => ctx.slots.register({
       name: 'settings.section',
       id: 'skills',
       order: 25,
       label: () => t('nav'),
-      inject: () => ({ openPath }),
-    }, SkillManagerSection))
+      inject: () => ({ openPath, api }),
+    }, SkillHubSection))
   })
 }

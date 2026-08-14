@@ -1,4 +1,5 @@
-# dsh-skill-manager bundle：向组合挂宿主 half（settings 命令/状态通道 + 技能导入执行器）
+# dsh-skill-hub bundle:向组合挂宿主 half(skillHub 网关:全局技能库的
+# 状态/导入(引用|复制)/编辑/导出执行器)
 - insert:
-    - id: dsh-skill-manager
-      name: 'dsh-skill-manager'
+    - id: skill-hub
+      name: 'dsh-skill-hub'

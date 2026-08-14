@@ -1,90 +1,87 @@
-# dsh-skill-manager
+# dsh-skill-hub
 
-DeepSeek Harness（dsh）第三方插件：**技能管理器**。在 dsh web 的**设置界面**里增加「技能」导航页（与 Models / General / Plugins 同级，英文界面显示 Skills），查看、导入、编辑、删除技能——导入的技能自动出现在输入框的 `/` 斜杠菜单中。
+DeepSeek Harness(dsh)的第三方技能中枢:**把散落各处的技能汇成全局库**。
+Claude Code 的 `~/.claude/skills`、项目目录、`.skill` 包……统一入库到
+`~/.dsh/skills`(官方 skill-filesystem 的默认扫描根,watcher 实时),入库即
+出现在输入框的「/」斜杠菜单。设置页里的「🧩 技能」导航页。
 
-对标 Claude 网页版的技能管理器，入口更低层（直接管理本地 `SKILL.md` 文件）。
+## 两种入库身份
 
-## 功能
+| | 引用(推荐) | 副本 |
+| --- | --- | --- |
+| 实现 | `skills/<name>` → 来源的**符号链接** | 整树拷贝 |
+| 同步 | **不存在同步问题**:只有一份文件,编辑即编辑来源 | 与来源独立演化(state 记录来源备查) |
+| 来源删了 | 面板标注「引用失效」,一键移除(不动来源) | 无影响 |
+| 适用 | 来源长期存在且归你维护 | 来源临时(.skill 包、要删的仓库),或想改全局版不动来源 |
 
-- **已安装**：列出 `<dshHome>/skills` 下的全部技能（目录式 `<name>/SKILL.md` 与平铺式 `<name>.md`），显示描述（Markdown 经官方 `MarkdownText` 渲染）、调用方式（用户/模型）、添加时间、导入来源；支持编辑（读取全文 → 面板内编辑 → 保存）、删除（移入 `<dshHome>/skill-trash` 回收站，可找回）、导出 `.skill` 包、打开所在目录、复制 `/名称`。
-- **导入**（三段式动线）：① 从来源目录导入——扫描「来源」页配置的目录（默认 `~/.claude/skills`，即可直接导入本机 Claude 技能），一键导入；② 上传 `.skill` 包；③ 粘贴文本创建。导入支持三种形态：
-  - 目录式（`SKILL.md` + `references/` 等资源树）——**整树拷贝**，资源文件原样保留；
-  - 平铺 `.md` 单文件——走清洗管线（见下）；
-  - **`.skill` 打包**（Claude 网页版导出格式，zip：`<name>/SKILL.md` + 任意资源文件）——整包解压。
-- **粘贴 / 上传**（导入页第 ②③ 段）：上传 `.skill` 文件（base64 上传，上限 64 MB）；或粘贴名称 + 描述 + 正文直接落为标准技能文件。
-- **来源**：列表式管理导入扫描目录——每行一个目录（支持 `~`），添加/移除即时生效并落盘。
-- **斜杠调用**：导入即生效——`<dshHome>/skills` 是官方 skill-filesystem provider 的默认扫描根（resourceBase 指向技能目录，包内资源文件对模型可用），`/技能名` 出现在输入框斜杠菜单中，无需任何额外接线。
+harness 的技能扫描、fs 提供者与 watcher 都原生跟随符号链接(实测
+skill-filesystem 的 `nodeEntryKind` 显式处理),引用无需任何补丁,且在
+全部加载形态(含 SDK/ACP,插件装不进去的那些)下生效。
 
-### .skill 包格式
+## 概念对齐 harness 现实
 
-与 Claude 网页版一致：标准 zip，内含一个顶层技能目录：
+- **没有「安装」这回事**:技能放进扫描根即生效。本页管理的是全局库
+  (`~/.dsh/skills`,rank 400,对所有会话生效);项目目录里的技能
+  (`.dsh/skills`、`.agents/skills`,rank 100/200)由 harness 直接扫描,
+  不经过本页——它们「一直可调用」正是这个原因,同名时项目技能优先。
+- **技能是文件树,不是一个 MD**:编辑器只编辑 `SKILL.md` 并明示还有几个
+  资源文件;资源用「打开目录」管理。导出 .skill 整树打包(引用则解引用
+  打包真实文件)。
+- **编辑引用 = 编辑来源**:编辑器头部黄字明示,保存直接写入来源文件。
 
-```
-packed-skill.skill (zip)
-└── packed-skill/
-    ├── SKILL.md          # frontmatter（name/description 等）+ 正文
-    └── files/…           # 任意资源（图片、PDF、参考文档…）
-```
+## 页签
 
-导入时整树解压到 `<dshHome>/skills/<name>/`；导出则反向打包（平铺 `.md` 技能也按 `<name>/SKILL.md` 形态打包）。同名冲突自动追加 `-2`/`-3` 序号，并把 frontmatter `name:` 同步为最终目录名。包内路径做了安全化（拒绝绝对路径与 `..` 穿越）。
-
-### 清洗管线
-
-导入/保存时对内容做结构清洗，但**保留全部功能字段**：
-
-- 名称规范化为 kebab-case（`Demo Skill!!` → `demo-skill`）；与已安装冲突时自动追加 `-2`/`-3` 序号。
-- 缺 `description` 时取正文第一行非标题文本充当（截断 200 字符）。
-- `name`/`description` 之外的 frontmatter 键**原样保留**：`whenToUse`、`metadata`、`disable-model-invocation`、`user-invocable` 及任何未知键。
-- 产出统一为 `---\nname: …\ndescription: …\n（原样保留行）\n---\n\n正文` 的标准格式。
+1. **全局技能**:页首动作行「＋ 新建技能」(内联展开,不用滚动)与
+   「上传 .skill」(选完文件即入库,无中间确认步);技能多时有筛选框。
+   每张卡:身份徽标(`引用 → 来源` / `副本` / `本地创建` / `引用失效`)、
+   资源文件数、非默认调用策略;描述默认 3 行折叠(点击展开);主操作
+   「编辑 SKILL.md」,导出/打开目录/复制名收进 ⋯ 菜单,删除行内两步确认
+   (引用只删链接)。
+2. **发现**:页首「扫描目录」chips 内联管理(每个 chip 标注技能数或
+   「不存在」,✕ 即时移除,＋ 就地添加——不再有独立的「来源」页签);
+   扫描结果每项「引用」(主)/「复制」,「全部引用」走单次批量 RPC;
+   结果多时有筛选框。
 
 ## 架构
 
-双 half 单包结构（与官方外部插件模板一致）：
+- **宿主端**(`lib/index.mjs`):`SkillHubGateway` 继承 `TypertRemoteService`,
+  暴露 `skillHub/getState|runCommand` 两个 RPC(runCommand 负载为命令联合,
+  src-json 过 wire)。此前的 3180–3189 端口探测 sidecar HTTP 服务已移除。
+  第三方双副本场景下 SRC 发现失明,同时注册弱清单进宿主 typert registry。
+- **浏览器端**(`lib/client.js`):$mount identity 编解码描述符 →
+  `ctx.remote.skillHub`;面板注册 `settings.section` 槽,「打开目录」走官方
+  `host.openPath`。
 
-```
-src/index.ts                    宿主端 half（Node）：技能扫描/清洗/导入/编辑/删除 + 环回 sidecar HTTP
-src/client/index.ts             浏览器 half：把设置页注册进官方 settings.section 槽
-src/client/SkillManagerSection.tsx   设置页 React 组件（三个页签：已安装 / 导入 / 来源）
-cordis.patch.yml                bundle 层声明（向组合 insert 本插件）
-```
-
-浏览器 half 通过官方 `ui-slots` 系统注册：`ctx.slots.inject('settings.section', …)`，与官方 Models / Plugins 设置页同一机制，入口自然融入设置界面。导航标签走官方 `locale` 服务（中文「技能」/ 英文 Skills）；页面标题使用官方 `IconSkillOutline16` 图标（导航行的图标由宿主 `SettingsRoot` 按 id 硬编码，第三方 id 只能得到兜底齿轮）。
-
-### 数据通道：环回 sidecar
-
-官方 RPC map 是构建期固定的，第三方插件不能注册新 RPC；`settings.*` 线上面也有命名空间白名单（只放行官方命名空间）。因此浏览器面板与宿主 half 之间使用插件自建的环回 HTTP 服务：
-
-- 宿主 half 绑定 `127.0.0.1`，端口取 **3180–3189** 中第一个空闲位（官方 web 默认 3080，互不冲突）。
-- 浏览器 half 打开面板时按相同顺序探测 `GET /ping` 完成发现。
-- 端点：`GET /ping`（发现）、`GET /state`（状态 + 来源配置）、`POST /command`（全部操作，同步请求-响应）。
-- **安全围栏**：只放行本机 Origin（`127.0.0.1` / `localhost` / `[::1]` 或无 Origin 的本机进程）且 Host 必须是环回地址——恶意网页的跨站请求与 DNS rebinding 均被拒绝；请求体上限 5 MB。
-- `import` 命令的来源路径必须位于配置的来源目录内，拒绝任意路径读取；技能名经 kebab-case 规范化后天然不含 `/` 与 `..`。
-
-状态与来源配置存于 `<dshHome>/skills/.skill-manager.json`（导入清单 `skills` + 来源 `sources`）。
+state 文件 `~/.dsh/skills/.skill-manager.json` 记录来源配置与每个技能的
+`{mode, source, addedAt}`(为二期漂移检测预留 schema)。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add <本仓库路径或 git URL>
+dsh plugin --profile web add /path/to/dsh-skill-hub
 ```
 
-随后正常启动 `dsh web`（或 `dsh --profile web`）即可。与其他插件独立加载、合并加载均互不依赖（端口冲突时自动顺延到 3181–3189）。
+安装后重启 `dsh web`。卸载:`dsh plugin --profile web remove dsh-skill-hub`。
 
-`$DSH_HOME` 环境变量可覆盖主目录（默认 `~/.dsh`），与官方 skill-filesystem provider 的解析规则一致。
+## 已知限制
+
+- 副本与来源的漂移检测/拉取/推回是二期;本期副本只记录来源不判定漂移。
+- Windows 上目录引用用 junction;文件级引用无特权时自动退化为复制并如实提示。
+- 引用技能的库内链接名固定于入库时刻;来源 frontmatter 改名后技能名跟着
+  来源走,链接名不自动更新(无害,仅目录名与技能名不一致)。
+- 「全部引用」串行执行,遇错即停(逐条报错,不刷屏)。
 
 ## 开发
 
 ```sh
 pnpm install
-pnpm build          # tsdown：宿主 half（lib/index.mjs，esm）+ 浏览器 half（lib/client.js，__ModuleLoader__ 契约）
-pnpm exec tsc --noEmit
-node test/smoke.mjs # 端到端冒烟：发现 → 全部命令 → 安全围栏，11 组断言
+pnpm run check   # tsc --noEmit
+pnpm run build   # tsdown(宿主 ESM + 浏览器 bundle)
 ```
 
-## 已知限制
+注意:宿主方法参数名就是 RPC wire 字段名(Gateway SRC 模式),构建不得
+压缩改写参数名。
 
-- **中文名称会被清洗掉**：kebab-case 规范化只保留 `[a-z0-9]`，纯中文名导入后会回退为 `skill`（建议导入前起一个拉丁名称）。
-- 端口 3180–3189 全被占用时退到 OS 随机端口并告警，浏览器面板将无法自动发现（同一台机器跑 10 个以上 dsh 实例才会触发）。
-- 编辑保存会重新走清洗管线：手工排版的 frontmatter 键顺序可能重排（`name`/`description` 固定在前，其余按键原样保留原顺序），正文首尾空白会被裁剪。
-- 面板样式完全复用官方设置页体系（`Button` 原子组件 + `--dsw-alias-*` 设计令牌 + 官方尺寸词汇），深浅色随宿主主题自动适配；类名仅带 `dsh-skm-` 前缀防止与他插件冲突。
-- 未提供按目录批量导入；导入以技能为单位。
+## 许可
+
+MIT

@@ -7,10 +7,14 @@ settings:
 importers:
 
   .:
-    devDependencies:
+    dependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
         version: 4.0.1
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: ^0.1.0-rc.5
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)
+    devDependencies:
       '@deepseek-ai/dsh-client-runtime':
         specifier: ^0.1.0-rc.6
         version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-api-remotes@0.1.0-rc.6(f2dc5e8f97b6d9ac60a4725cd4e5ba50))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-typert-protocol@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-user-approval@0.1.0-rc.6(4f10acf3d658babcfceb8599a52cc63b))(@types/react@18.3.31)

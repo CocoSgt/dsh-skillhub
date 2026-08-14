@@ -1,6 +1,6 @@
 {
-  "name": "dsh-skill-manager",
-  "description": "dsh 技能管理器——设置里的「🧩 技能」页：查看/导入/编辑/删除技能（SKILL.md / .md），支持从 ~/.claude/skills 等来源目录导入与粘贴导入",
+  "name": "dsh-skill-hub",
+  "description": "dsh 技能中枢:把散落各处的技能(Claude Code、项目、.skill 包)汇成全局库——引用或复制导入,斜杠菜单直接调用;设置页「🧩 技能」",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -19,7 +19,8 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime"
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
     }
@@ -42,5 +43,9 @@
     "tsdown": "0.22.2",
     "typescript": "^5.9.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.5",
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
 }
